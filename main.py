@@ -40,9 +40,9 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Bot credentials from environment variables (Render compatible)
-API_ID = int(os.environ.get("API_ID",  25051610))
-API_HASH = os.environ.get("API_HASH", "91c0e86e56bb27261662779091033")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8118302536:AAGOyYK6262662ZMj8xB_Z56lhqs")
+API_ID = int(os.environ.get("API_ID",  38498066))
+API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 # Initialize Bot Globally (IMPORTANT FIX)
 bot = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -59,11 +59,11 @@ def run_flask():
     app.run(host="0.0.0.0", port=8000) # Use here 8080 port,if you are deploying it on koyeb
     
 image_list = [
-"https://files.catbox.moe/l5kelu.jpg",
-"https://files.catbox.moe/vm52uq.jpg",
-"https://files.catbox.moe/ado74a.jpg",
-"https://files.catbox.moe/obno6z.jpg",
-"https://files.catbox.moe/sgwqv2.jpg",
+"https://graph.org/file/d24b9bd4d0592a07ad746-de047531c5efafafce.jpg",
+"https://graph.org/file/06d5077e2fe5442e1dbb4-77cb51eecc0aab0608.jpg",
+"https://graph.org/file/8ea482ae6278601bae5c5-b1475ac9b0622a6cd7.jpg",
+"https://graph.org/file/5312e32455e56860c75cb-b56bedb77b7cf93227.jpg",
+"https://graph.org/file/977afb0f88089d227a19d-443ba34add7d83a182.jpg",
 ]
 print(4321)
 #bot = Client(
