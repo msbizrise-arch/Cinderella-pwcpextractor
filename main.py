@@ -56,7 +56,7 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=8080) # Use here 8080 port,if you are deploying it on koyeb
+    app.run(host="0.0.0.0", port=8000) # Use here 8080 port,if you are deploying it on koyeb
     
 image_list = [
 "https://files.catbox.moe/l5kelu.jpg",
