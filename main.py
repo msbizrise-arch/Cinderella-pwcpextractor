@@ -2027,9 +2027,8 @@ async def process_pwwp(bot, m, user_id):
                    await editable.edit(new_text)
 
             except Exception as e:
-              if "MESSAGE_NOT_MODIFIED" not in 
-            str(e):
-                 raise e
+              if "MESSAGE_NOT_MODIFIED" not in str(e):
+                  raise e
 
             else:
                 # Existing flow: Fetch ALL batches from multiple sources
