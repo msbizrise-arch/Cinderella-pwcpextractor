@@ -1262,7 +1262,7 @@ async def fetch_schedule_by_date_range(session, batch_id, start_epoch, end_epoch
     # Strategy 4: Try todays-schedule and filter (if date range includes today)
     if not all_schedules:
         try:
-            url = f"https://api.penpencil.co/v1/batches/{batch_id}/todays-schedule"
+            url = f"https://api.penpencil.co/v2/batches/{batch_id}/todays-schedule"
             data = await fetch_pwwp_data(session, url, headers=headers)
             if data and data.get("data"):
                 items = data["data"]
@@ -1696,7 +1696,7 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
 # ===============================================================
 async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSession, selected_batch_id, subject_id, schedule_id, headers: Dict) -> List[str]:
     """Fetch content details for a single today's schedule item."""
-    url = f"https://api.penpencil.co/v1/batches/{selected_batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
+    url = f"https://api.penpencil.co/v2/batches/{selected_batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
     data = await fetch_pwwp_data(session, url, headers)
     content = []
 
@@ -1753,7 +1753,7 @@ async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSessio
 
 async def get_pwwp_all_todays_schedule_content(session: aiohttp.ClientSession, selected_batch_id: str, headers: Dict) -> List[str]:
     """Fetch all of today's schedule content using the working v1 endpoint."""
-    url = f"https://api.penpencil.co/v1/batches/{selected_batch_id}/todays-schedule"
+    url = f"https://api.penpencil.co/v2/batches/{selected_batch_id}/todays-schedule"
     todays_schedule_details = await fetch_pwwp_data(session, url, headers)
     all_content = []
 
