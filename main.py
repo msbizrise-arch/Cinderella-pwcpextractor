@@ -1241,7 +1241,7 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
         start_time = schedule_item.get("startTime", schedule_item.get("startDate", ""))
         end_time_val = schedule_item.get("endTime", schedule_item.get("endDate", ""))
 
-        subject_name = subject_map.get(subject_id, "")
+        subject_name = subject_map.get(str(subject_id), "")
         if not subject_name:
             if isinstance(raw_subject, dict):
                 subject_name = raw_subject.get("subject", raw_subject.get("name", ""))
