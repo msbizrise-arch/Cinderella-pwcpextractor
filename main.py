@@ -70,59 +70,6 @@ print(4321)
 
 
 # ===============================================================
-# HARDCODED BATCH DATABASE - For without-purchase batch access
-# Each batch has: batchId (PW internal), name, _id (v2 API ID)
-# ===============================================================
-HARDCODED_PW_BATCHES = [
-    {
-    "batchId": "698adaafee5f29171102c9ca",
-    "type": "E_BATCH",
-    "name": "Yakeen NEET Hindi 2027",
-    "_id": "6a337b965244447b88218145",
-    "subjects": [
-        {
-            "subject": "Physics",
-            "subjectId": "5f709c351b999704b83cca8a"
-        },
-        {
-            "subject": "Zoology",
-            "subjectId": "60f66f13725eb9001895d101"
-        }
-    ]
-},
-    {
-        "batchId": "69897f0ad7c19b7b2f7cc35f",
-        "name": "Arjuna NEET 2027",
-        "_id": "6a337c219435907aebad6216"
-    },
-    {
-        "batchId": "6779346f920e596fe7f0e247",
-        "name": "Lakshya NEET 2027",
-        "_id": "6a337c223f74dfe4baaf5cfb"
-    }
-]
-
-
-def find_hardcoded_batch(batch_search: str) -> dict:
-    """
-    Find a hardcoded batch by name (case-insensitive).
-    Returns the batch dict if found, None otherwise.
-    Matches partial names too - e.g., 'yakeen' matches 'Yakeen NEET Hindi 2027'
-    """
-    if not batch_search:
-        return None
-    search_lower = batch_search.strip().lower()
-    for batch in HARDCODED_PW_BATCHES:
-        if search_lower == batch["name"].lower():
-            return batch
-    # Also try partial match
-    for batch in HARDCODED_PW_BATCHES:
-        if search_lower in batch["name"].lower():
-            return batch
-    return None
-
-
-# ===============================================================
 # GLOBAL STATE: Pagination tracking for batch selection
 # ===============================================================
 # Stores batch list and current page per user
@@ -1186,205 +1133,189 @@ def get_batches_for_page(user_id: int, page: int) -> Tuple[List[dict], str]:
 
 
 # ===============================================================
-# TIMESTAMP CONVERSION: User timestamp -> Date Range (IST based)
+# DATE PARSING: User date input (DD/MM/YYYY) -> Date Range (IST based)
 # ===============================================================
-def parse_user_timestamp_to_date_range(timestamp_str: str):
+def parse_user_date_to_range(date_str: str):
     """
-    User sends a timestamp in milliseconds (assumed to be in IST).
+    User sends a date in DD/MM/YYYY format (e.g. 16/06/2026).
     Convert to:
     - start_epoch: 12:00 AM IST of that day (in UTC ms)
-    - end_epoch: user's timestamp (in UTC ms)
+    - end_epoch: 11:59:59.999 PM IST of that day (in UTC ms)
     Returns: (start_epoch_ms, end_epoch_ms, date_str_yyyy_mm_dd, display_date_str)
+    Returns (None, None, None, None) if the input is invalid.
     """
-    try:
-        user_timestamp = int(timestamp_str)
-    except ValueError:
+    if not date_str:
         return None, None, None, None
 
-    # The timestamp is in ms since epoch (UTC-based)
-    # Convert to datetime in IST
-    ts_sec = user_timestamp / 1000
-    dt_utc = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
-    dt_ist = dt_utc.astimezone(IST)
+    cleaned = date_str.strip()
+    # Accept both / and - as separators, e.g. 16/06/2026 or 16-06-2026
+    cleaned = cleaned.replace("-", "/")
 
-    # Start of day in IST: same date, 00:00:00 IST
-    start_dt_ist = dt_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-    # Convert back to UTC for API calls
+    parsed_dt = None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            parsed_dt = datetime.strptime(cleaned, fmt)
+            break
+        except ValueError:
+            continue
+
+    if parsed_dt is None:
+        return None, None, None, None
+
+    # Treat the parsed date as a calendar day in IST
+    start_dt_ist = parsed_dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=IST)
+    end_dt_ist = start_dt_ist + timedelta(days=1) - timedelta(milliseconds=1)
+
     start_dt_utc = start_dt_ist.astimezone(timezone.utc)
+    end_dt_utc = end_dt_ist.astimezone(timezone.utc)
+
     start_epoch = int(start_dt_utc.timestamp() * 1000)
+    end_epoch = int(end_dt_utc.timestamp() * 1000)
 
-    # End is user's timestamp
-    end_epoch = user_timestamp
+    date_str_iso = start_dt_ist.strftime("%Y-%m-%d")
+    display_date = start_dt_ist.strftime("%d-%m-%Y")
 
-    date_str = dt_ist.strftime("%Y-%m-%d")
-    display_date = dt_ist.strftime("%d-%m-%Y")
-
-    return start_epoch, end_epoch, date_str, display_date
+    return start_epoch, end_epoch, date_str_iso, display_date
 
 
 # ===============================================================
 # CRITICAL FIX: Fetch schedule for SPECIFIC DATE RANGE
-# Uses BOTH batchId and _id for maximum compatibility
-# Now properly handles non-purchased batches
+# Now properly handles purchased batches (single batch _id)
 # ===============================================================
-async def fetch_schedule_by_date_range(session, batch_id, batch_pw_id, start_epoch, end_epoch, headers):
+async def fetch_schedule_by_date_range(session, batch_id, start_epoch, end_epoch, headers):
     """
     Fetch scheduled classes for a date range from PW API.
-    CRITICAL FIX: Tries both _id (v2 API ID) and batchId (PW internal)
-    for maximum compatibility with non-purchased batches.
-    Also properly handles topic extraction to avoid "Unknown Topic".
+    Tries v1 -> v2 -> v3 schedule endpoints, then falls back to
+    filtering todays-schedule if the date range covers today.
     """
     all_schedules = []
 
-    # Strategy 1: Try v1 schedule endpoint with BOTH IDs
-    for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            url = f"https://api.penpencil.co/v1/batches/{bid}/schedule"
-            params = {
-                "startDate": start_epoch,
-                "endDate": end_epoch,
-                "page": 1
-            }
-            data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-            if data and data.get("data"):
-                items = data["data"]
-                if isinstance(items, list):
-                    for item in items:
-                        item["_source"] = "v1-schedule"
-                    all_schedules.extend(items)
-                    logging.info(f"v1/schedule succeeded with {label}={bid}: {len(items)} items")
-                    return all_schedules
-                elif isinstance(items, dict) and items.get("data"):
-                    for item in items["data"]:
-                        item["_source"] = "v1-schedule"
-                    all_schedules.extend(items["data"])
-                    logging.info(f"v1/schedule succeeded with {label}={bid}: {len(items['data'])} items")
-                    return all_schedules
-        except Exception as e:
-            logging.warning(f"v1/schedule failed with {label}={bid}: {e}")
+    # Strategy 1: v1 schedule endpoint
+    try:
+        url = f"https://api.penpencil.co/v1/batches/{batch_id}/schedule"
+        params = {
+            "startDate": start_epoch,
+            "endDate": end_epoch,
+            "page": 1
+        }
+        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
+        if data and data.get("data"):
+            items = data["data"]
+            if isinstance(items, list):
+                for item in items:
+                    item["_source"] = "v1-schedule"
+                all_schedules.extend(items)
+                logging.info(f"v1/schedule succeeded: {len(items)} items")
+                return all_schedules
+            elif isinstance(items, dict) and items.get("data"):
+                for item in items["data"]:
+                    item["_source"] = "v1-schedule"
+                all_schedules.extend(items["data"])
+                logging.info(f"v1/schedule succeeded: {len(items['data'])} items")
+                return all_schedules
+    except Exception as e:
+        logging.warning(f"v1/schedule failed: {e}")
 
-    # Strategy 2: Try v2 schedule endpoint with BOTH IDs
-    for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            url = f"https://api.penpencil.co/v2/batches/{bid}/schedule"
-            params = {
-                "startDate": start_epoch,
-                "endDate": end_epoch,
-                "page": 1
-            }
-            data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-            if data and data.get("data"):
-                items = data["data"]
-                if isinstance(items, list):
-                    for item in items:
-                        item["_source"] = "v2-schedule"
-                    all_schedules.extend(items)
-                    logging.info(f"v2/schedule succeeded with {label}={bid}: {len(items)} items")
-                    return all_schedules
-                elif isinstance(items, dict) and items.get("data"):
-                    for item in items["data"]:
-                        item["_source"] = "v2-schedule"
-                    all_schedules.extend(items["data"])
-                    logging.info(f"v2/schedule succeeded with {label}={bid}: {len(items['data'])} items")
-                    return all_schedules
-        except Exception as e:
-            logging.warning(f"v2/schedule failed with {label}={bid}: {e}")
+    # Strategy 2: v2 schedule endpoint
+    try:
+        url = f"https://api.penpencil.co/v2/batches/{batch_id}/schedule"
+        params = {
+            "startDate": start_epoch,
+            "endDate": end_epoch,
+            "page": 1
+        }
+        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
+        if data and data.get("data"):
+            items = data["data"]
+            if isinstance(items, list):
+                for item in items:
+                    item["_source"] = "v2-schedule"
+                all_schedules.extend(items)
+                logging.info(f"v2/schedule succeeded: {len(items)} items")
+                return all_schedules
+            elif isinstance(items, dict) and items.get("data"):
+                for item in items["data"]:
+                    item["_source"] = "v2-schedule"
+                all_schedules.extend(items["data"])
+                logging.info(f"v2/schedule succeeded: {len(items['data'])} items")
+                return all_schedules
+    except Exception as e:
+        logging.warning(f"v2/schedule failed: {e}")
 
-    # Strategy 3: Try v3 schedule endpoint with BOTH IDs
-    for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            url = f"https://api.penpencil.co/v3/batches/{bid}/schedule"
-            params = {
-                "startDate": start_epoch,
-                "endDate": end_epoch,
-                "page": 1
-            }
-            data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-            if data and data.get("data"):
-                items = data["data"]
-                if isinstance(items, list):
-                    for item in items:
-                        item["_source"] = "v3-schedule"
-                    all_schedules.extend(items)
-                    logging.info(f"v3/schedule succeeded with {label}={bid}: {len(items)} items")
-                    return all_schedules
-                elif isinstance(items, dict) and items.get("data"):
-                    for item in items["data"]:
-                        item["_source"] = "v3-schedule"
-                    all_schedules.extend(items["data"])
-                    logging.info(f"v3/schedule succeeded with {label}={bid}: {len(items['data'])} items")
-                    return all_schedules
-        except Exception as e:
-            logging.warning(f"v3/schedule failed with {label}={bid}: {e}")
+    # Strategy 3: v3 schedule endpoint
+    try:
+        url = f"https://api.penpencil.co/v3/batches/{batch_id}/schedule"
+        params = {
+            "startDate": start_epoch,
+            "endDate": end_epoch,
+            "page": 1
+        }
+        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
+        if data and data.get("data"):
+            items = data["data"]
+            if isinstance(items, list):
+                for item in items:
+                    item["_source"] = "v3-schedule"
+                all_schedules.extend(items)
+                logging.info(f"v3/schedule succeeded: {len(items)} items")
+                return all_schedules
+            elif isinstance(items, dict) and items.get("data"):
+                for item in items["data"]:
+                    item["_source"] = "v3-schedule"
+                all_schedules.extend(items["data"])
+                logging.info(f"v3/schedule succeeded: {len(items['data'])} items")
+                return all_schedules
+    except Exception as e:
+        logging.warning(f"v3/schedule failed: {e}")
 
-    # Strategy 4: Try todays-schedule and filter (if date range includes today)
-    if not all_schedules:
-        for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-            if not bid:
-                continue
-            try:
-                url = f"https://api.penpencil.co/v2/batches/{bid}/todays-schedule"
-                data = await fetch_pwwp_data(session, url, headers=headers)
-                if data and data.get("data"):
-                    items = data["data"]
-                    if isinstance(items, list):
-                        for item in items:
-                            # Check if item falls within date range
-                            item_start = item.get("startTime", item.get("startDate", 0))
-                            try:
-                                if item_start and start_epoch <= int(item_start) <= end_epoch:
-                                    item["_source"] = "todays-schedule"
-                                    all_schedules.append(item)
-                            except (ValueError, TypeError):
-                                # If can't compare, include anyway
-                                item["_source"] = "todays-schedule"
-                                all_schedules.append(item)
-                        if all_schedules:
-                            logging.info(f"todays-schedule succeeded with {label}={bid}: {len(all_schedules)} items")
-                            return all_schedules
-            except Exception as e:
-                logging.warning(f"todays-schedule failed with {label}={bid}: {e}")
+    # Strategy 4: todays-schedule, filtered by date range (covers "today" selections)
+    try:
+        url = f"https://api.penpencil.co/v2/batches/{batch_id}/todays-schedule"
+        data = await fetch_pwwp_data(session, url, headers=headers)
+        if data and data.get("data"):
+            items = data["data"]
+            if isinstance(items, list):
+                for item in items:
+                    item_start = item.get("startTime", item.get("startDate", 0))
+                    try:
+                        if item_start and start_epoch <= int(item_start) <= end_epoch:
+                            item["_source"] = "todays-schedule"
+                            all_schedules.append(item)
+                    except (ValueError, TypeError):
+                        item["_source"] = "todays-schedule"
+                        all_schedules.append(item)
+                if all_schedules:
+                    logging.info(f"todays-schedule succeeded: {len(all_schedules)} items")
+                    return all_schedules
+    except Exception as e:
+        logging.warning(f"todays-schedule failed: {e}")
 
     return all_schedules
 
 
 # ===============================================================
 # CONTENT-BASED fallback: Fetch schedule via subject contents
-# Works when schedule endpoints fail (non-purchased batches)
-# CRITICAL FIX: Now tries both batch_id and batch_pw_id
+# Works when schedule endpoints fail
 # ===============================================================
-async def fetch_schedule_via_contents(session, batch_id, batch_pw_id, start_epoch, end_epoch, headers):
+async def fetch_schedule_via_contents(session, batch_id, start_epoch, end_epoch, headers):
     """
     Fallback: Get batch subjects -> fetch all contents -> filter by date.
-    This works for ANY batch including non-purchased.
-    CRITICAL FIX: Tries both IDs for batch details endpoint.
     """
     all_items = []
 
-    # Get batch details for subjects - try _id first, then batchId
     subjects = []
-    for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            detail_url = f"https://api.penpencil.co/v3/batches/{bid}/details"
-            batch_resp = await fetch_pwwp_data(session, detail_url, headers=headers)
-            if batch_resp and batch_resp.get("success") and batch_resp.get("data"):
-                subjects = batch_resp.get("data", {}).get("subjects", [])
-                if subjects:
-                    logging.info(f"Fetched {len(subjects)} subjects using {label}={bid}")
-                    break
-        except Exception as e:
-            logging.warning(f"Failed to fetch subjects with {label}={bid}: {e}")
+    try:
+        detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/details"
+        batch_resp = await fetch_pwwp_data(session, detail_url, headers=headers)
+        if batch_resp and batch_resp.get("success") and batch_resp.get("data"):
+            subjects = batch_resp.get("data", {}).get("subjects", [])
+            if subjects:
+                logging.info(f"Fetched {len(subjects)} subjects for date-content fallback")
+    except Exception as e:
+        logging.warning(f"Failed to fetch subjects: {e}")
 
     if not subjects:
-        logging.error("No subjects found for batch - both IDs failed")
+        logging.error("No subjects found for batch")
         return []
 
     for subject in subjects:
@@ -1394,25 +1325,20 @@ async def fetch_schedule_via_contents(session, batch_id, batch_pw_id, start_epoc
 
         # Get chapters for this subject
         chapters = []
-        for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-            if not bid:
-                continue
-            try:
-                page = 1
-                while page <= 20:
-                    url = f"https://api.penpencil.co/v2/batches/{bid}/subject/{subject_id}/topics?page={page}"
-                    data = await fetch_pwwp_data(session, url, headers=headers)
-                    if data and data.get("data"):
-                        chapters.extend(data["data"])
-                        if len(data["data"]) < 20:
-                            break
-                        page += 1
-                    else:
+        try:
+            page = 1
+            while page <= 20:
+                url = f"https://api.penpencil.co/v2/batches/{batch_id}/subject/{subject_id}/topics?page={page}"
+                data = await fetch_pwwp_data(session, url, headers=headers)
+                if data and data.get("data"):
+                    chapters.extend(data["data"])
+                    if len(data["data"]) < 20:
                         break
-                if chapters:
+                    page += 1
+                else:
                     break
-            except Exception as e:
-                logging.warning(f"Failed to fetch chapters with {label}={bid}: {e}")
+        except Exception as e:
+            logging.warning(f"Failed to fetch chapters: {e}")
 
         # For each chapter, fetch contents and filter by date
         for chapter in chapters:
@@ -1421,45 +1347,40 @@ async def fetch_schedule_via_contents(session, batch_id, batch_pw_id, start_epoc
                 continue
 
             for content_type in ['videos', 'notes', 'DppNotes', 'DppVideos']:
-                for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-                    if not bid:
-                        continue
-                    try:
-                        page = 1
-                        while page <= 20:
-                            url = f"https://api.penpencil.co/v2/batches/{bid}/subject/{subject_id}/contents"
-                            params = {
-                                "tag": chapter_id,
-                                "contentType": content_type,
-                                "page": page
-                            }
-                            data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-                            if not data or not data.get("data"):
-                                break
+                try:
+                    page = 1
+                    while page <= 20:
+                        url = f"https://api.penpencil.co/v2/batches/{batch_id}/subject/{subject_id}/contents"
+                        params = {
+                            "tag": chapter_id,
+                            "contentType": content_type,
+                            "page": page
+                        }
+                        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
+                        if not data or not data.get("data"):
+                            break
 
-                            items = data["data"]
-                            for item in items:
-                                # Check if item's startTime falls within range
-                                item_start = item.get("startTime", item.get("startDate", 0))
-                                if item_start:
-                                    try:
-                                        item_start_ms = int(item_start)
-                                        if start_epoch <= item_start_ms <= end_epoch:
-                                            item["_contentType"] = content_type
-                                            item["_subjectId"] = subject_id
-                                            item["_batchId"] = bid
-                                            item["_source"] = "content-filter"
-                                            all_items.append(item)
-                                    except (ValueError, TypeError):
-                                        pass
+                        items = data["data"]
+                        for item in items:
+                            # Check if item's startTime falls within range
+                            item_start = item.get("startTime", item.get("startDate", 0))
+                            if item_start:
+                                try:
+                                    item_start_ms = int(item_start)
+                                    if start_epoch <= item_start_ms <= end_epoch:
+                                        item["_contentType"] = content_type
+                                        item["_subjectId"] = subject_id
+                                        item["_batchId"] = batch_id
+                                        item["_source"] = "content-filter"
+                                        all_items.append(item)
+                                except (ValueError, TypeError):
+                                    pass
 
-                            if not data.get("hasMore", True) or len(items) < 20:
-                                break
-                            page += 1
-                        # If we got items with this ID, break to avoid duplicates
-                        break
-                    except Exception as e:
-                        logging.warning(f"Content fetch failed with {label}={bid}: {e}")
+                        if not data.get("hasMore", True) or len(items) < 20:
+                            break
+                        page += 1
+                except Exception as e:
+                    logging.warning(f"Content fetch failed for {content_type}: {e}")
 
     return all_items
 
@@ -1571,46 +1492,39 @@ def extract_subject_id_from_schedule_item(schedule_item: dict) -> str:
 
 
 # ===============================================================
-# ENHANCED: Process content for a specific date using user timestamp
+# ENHANCED: Process content for a specific date (DD/MM/YYYY input)
 # Uses both schedule endpoint + content-based fallback
-# Now properly uses IST and user's timestamp as endDate
-# CRITICAL FIX: Better topic extraction, batch ID fallback, and
-# subject_id validation to prevent 404 errors
+# Better topic extraction and subject_id validation to prevent 404s
 # ===============================================================
-async def process_date_content(session, batch_id, batch_pw_id, batch_name, start_epoch, end_epoch, target_date, headers, user_id):
+async def process_date_content(session, batch_id, batch_name, start_epoch, end_epoch, target_date, headers, user_id):
     """
     Process content extraction for a specific date range.
     start_epoch = 12:00 AM IST of the target day
-    end_epoch = user's provided timestamp
-    CRITICAL FIX: Now uses batch_pw_id fallback for non-purchased batches
+    end_epoch   = 11:59:59.999 PM IST of the target day
     Returns: (txt_path, zip_path, total_schedules, error_msg)
     """
-    # Get batch details for subjects - try both IDs
+    # Get batch details for subjects
     subjects = []
-    for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            detail_url = f"https://api.penpencil.co/v3/batches/{bid}/details"
-            batch_resp = await fetch_pwwp_data(session, detail_url, headers=headers)
-            if batch_resp and batch_resp.get("success"):
-                subjects = batch_resp.get("data", {}).get("subjects", [])
-                if subjects:
-                    logging.info(f"Fetched batch details using {label}={bid}: {len(subjects)} subjects")
-                    break
-        except Exception as e:
-            logging.warning(f"Failed to fetch batch details with {label}={bid}: {e}")
+    try:
+        detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/details"
+        batch_resp = await fetch_pwwp_data(session, detail_url, headers=headers)
+        if batch_resp and batch_resp.get("success"):
+            subjects = batch_resp.get("data", {}).get("subjects", [])
+            if subjects:
+                logging.info(f"Fetched batch details: {len(subjects)} subjects")
+    except Exception as e:
+        logging.warning(f"Failed to fetch batch details: {e}")
 
     if not subjects:
-        return None, None, 0, "Failed to fetch batch details (both IDs failed)"
+        return None, None, 0, "Failed to fetch batch details"
 
-    # Fetch schedule for the date range (try multiple strategies with BOTH IDs)
-    schedules = await fetch_schedule_by_date_range(session, batch_id, batch_pw_id, start_epoch, end_epoch, headers)
+    # Fetch schedule for the date range (try multiple strategies)
+    schedules = await fetch_schedule_by_date_range(session, batch_id, start_epoch, end_epoch, headers)
 
     # If no schedules found, try content-based fallback
     if not schedules:
         logging.info("No schedules from endpoint, trying content-based fallback")
-        schedules = await fetch_schedule_via_contents(session, batch_id, batch_pw_id, start_epoch, end_epoch, headers)
+        schedules = await fetch_schedule_via_contents(session, batch_id, start_epoch, end_epoch, headers)
 
     if not schedules:
         return None, None, 0, f"No classes scheduled for {target_date}"
@@ -1675,19 +1589,8 @@ async def process_date_content(session, batch_id, batch_pw_id, batch_name, start
         # Skip if subject_id is None or empty to prevent 404 errors
         if subject_id and schedule_id and isinstance(subject_id, str) and isinstance(schedule_id, str) and subject_id.lower() != "none":
             try:
-                # Try with batch_id first, then batch_pw_id
-                detail_data = None
-                for bid, label in [(batch_id, "_id"), (batch_pw_id, "batchId")]:
-                    if not bid:
-                        continue
-                    try:
-                        detail_url = f"https://api.penpencil.co/v3/batches/{bid}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
-                        detail_data = await fetch_pwwp_data(session, detail_url, headers=headers)
-                        if detail_data and detail_data.get("data"):
-                            logging.info(f"schedule-details succeeded with {label}={bid}")
-                            break
-                    except Exception as e:
-                        logging.warning(f"schedule-details failed with {label}={bid}: {e}")
+                detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
+                detail_data = await fetch_pwwp_data(session, detail_url, headers=headers)
 
                 if detail_data and detail_data.get("data"):
                     detail_item = detail_data["data"]
@@ -2167,8 +2070,7 @@ async def process_pwwp(bot, m, user_id):
 
             await editable.edit(
                 "**Enter Your Batch Name\n\n"
-                "Ab ALL batches milenge - purchased ho ya nahi! "
-                "Videos + PDFs dono!**"
+                "Sirf aapke PURCHASED batches search honge.**"
             )
             try:
                 input3 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
@@ -2179,139 +2081,99 @@ async def process_pwwp(bot, m, user_id):
                 return
 
             # ==========================================================
-            # CRITICAL FIX: Check hardcoded batches FIRST (case-insensitive)
-            # This allows without-purchase batch content extraction
-            # Now stores BOTH batchId and _id for API compatibility
+            # Fetch ALL purchased batches matching the search term
             # ==========================================================
-            hardcoded_batch = find_hardcoded_batch(batch_search)
+            all_batches = await fetch_all_pw_batches(session, headers, batch_search)
 
-            # CRITICAL FIX: Track both IDs for non-purchased batch access
-            selected_batch_pw_id = None  # PW internal batchId
+            if not all_batches:
+                raise Exception("No batches found for the given search name.")
 
-            if hardcoded_batch:
-                # Use hardcoded batch data directly - skip API batch search
-                # _id is the v2 API ID (used for content endpoints)
-                # batchId is the PW internal ID (used for schedule endpoints)
-                selected_batch_id = hardcoded_batch["_id"]
-                selected_batch_pw_id = hardcoded_batch["batchId"]
-                selected_batch_name = hardcoded_batch["name"]
+            # ==========================================================
+            # Pagination system for batch selection
+            # Store batches, show 10 per page with Next/Prev buttons
+            # ==========================================================
+            user_batch_pages[user_id] = {
+                "batches": all_batches,
+                "page": 0,
+                "message_id": None
+            }
 
-                # Subject data (if available in hardcoded db)
-                subjects = hardcoded_batch.get("subjects", [])
+            # Show first page (10 batches)
+            _, text = get_batches_for_page(user_id, 0)
+            keyboard = build_batch_pagination_keyboard(user_id, 0)
 
-                for subject in subjects:
-                    subject_name = subject.get("subject")
-                    subject_id = subject.get("subjectId")
+            total_batches = len(all_batches)
+            total_pages = (total_batches + 9) // 10
 
-                    print(f"Subject: {subject_name}")
-                    print(f"Subject ID: {subject_id}")
+            header = (
+                f"**Send index number of the course to download.\n\n"
+                f"{text}\n\n"
+                f"Showing page 1 of {total_pages} ({total_batches} total batches)\n"
+                f"If Your Batch Not Listed Above Enter - No**"
+            )
 
-                clean_batch_name = selected_batch_name.replace("/", "-").replace("|", "-")
-                clean_file_name = f"{user_id}_{clean_batch_name}"
+            # Edit the message with pagination keyboard
+            await editable.edit(header, reply_markup=keyboard)
 
-                try:
-                    new_text = (
-                        f"**✅ Hardcoded Batch Found!**\n\n"
-                        f"Batch: ```\n{selected_batch_name}\n```\n\n"
-                        f"**Extracting using pre-configured batch data...**"
-                    )
-
-                    if editable.text != new_text:
-                        await editable.edit(new_text)
-
-                except Exception as e:
-                    if "MESSAGE_NOT_MODIFIED" not in str(e):
-                        raise e
-
-            else:
-                # Existing flow: Fetch ALL batches from multiple sources
-                all_batches = await fetch_all_pw_batches(session, headers, batch_search)
-
-                if not all_batches:
-                    raise Exception("No batches found for the given search name.")
-
-                # ==========================================================
-                # CRITICAL FIX: Pagination system for batch selection
-                # Store batches, show 10 per page with Next/Prev buttons
-                # ==========================================================
-                user_batch_pages[user_id] = {
-                    "batches": all_batches,
-                    "page": 0,
-                    "message_id": None
-                }
-
-                # Show first page (10 batches)
-                _, text = get_batches_for_page(user_id, 0)
-                keyboard = build_batch_pagination_keyboard(user_id, 0)
-
-                total_batches = len(all_batches)
-                total_pages = (total_batches + 9) // 10
-
-                header = (
-                    f"**Send index number of the course to download.\n\n"
-                    f"{text}\n\n"
-                    f"Showing page 1 of {total_pages} ({total_batches} total batches)\n"
-                    f"If Your Batch Not Listed Above Enter - No**"
-                )
-
-                # Edit the message with pagination keyboard
-                await editable.edit(header, reply_markup=keyboard)
-
-                try:
-                    input4 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
-                    raw_text4 = input4.text
-                    await input4.delete(True)
-                except:
-                    await editable.edit("**Timeout! You took too long to respond😢.**")
-                    # Clean up pagination state
-                    user_batch_pages.pop(user_id, None)
-                    return
-
+            try:
+                input4 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                raw_text4 = input4.text
+                await input4.delete(True)
+            except:
+                await editable.edit("**Timeout! You took too long to respond😢.**")
                 # Clean up pagination state
-                page_data = user_batch_pages.pop(user_id, None)
+                user_batch_pages.pop(user_id, None)
+                return
 
-                if input4.text.isdigit():
-                    selected_index = int(input4.text.strip())
-                    if 1 <= selected_index <= len(all_batches):
-                        course = all_batches[selected_index - 1]
-                        selected_batch_id = course['_id']
-                        selected_batch_name = course['name']
+            # Clean up pagination state
+            page_data = user_batch_pages.pop(user_id, None)
+
+            if input4.text.isdigit():
+                selected_index = int(input4.text.strip())
+                if 1 <= selected_index <= len(all_batches):
+                    course = all_batches[selected_index - 1]
+                    selected_batch_id = course['_id']
+                    selected_batch_name = course['name']
+                    clean_batch_name = selected_batch_name.replace("/", "-").replace("|", "-")
+                    clean_file_name = f"{user_id}_{clean_batch_name}"
+                else:
+                    raise Exception(f"Invalid index. Please enter a number between 1 and {len(all_batches)}")
+
+            elif "No" in input4.text:
+                courses = find_pw_old_batch(batch_search)
+                if courses:
+                    text = ''
+                    for cnt, course in enumerate(courses):
+                        name = course['batch_name']
+                        text += f"{cnt + 1}. ```\n{name}```\n"
+
+                    await editable.edit(f"**Send index number of the course to download.\n\n{text}**")
+
+                    try:
+                        input5 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                        raw_text5 = input5.text
+                        await input5.delete(True)
+                    except:
+                        await editable.edit("**Timeout! You took too long to respond😢.**")
+                        return
+
+                    if input5.text.isdigit() and 1 <= int(input5.text) <= len(courses):
+                        selected_course_index = int(input5.text.strip())
+                        course = courses[selected_course_index - 1]
+                        selected_batch_id = course['batch_id']
+                        selected_batch_name = course['batch_name']
                         clean_batch_name = selected_batch_name.replace("/", "-").replace("|", "-")
                         clean_file_name = f"{user_id}_{clean_batch_name}"
                     else:
-                        raise Exception(f"Invalid index. Please enter a number between 1 and {len(all_batches)}")
-
-                elif "No" in input4.text:
-                    courses = find_pw_old_batch(batch_search)
-                    if courses:
-                        text = ''
-                        for cnt, course in enumerate(courses):
-                            name = course['batch_name']
-                            text += f"{cnt + 1}. ```\n{name}```\n"
-
-                        await editable.edit(f"**Send index number of the course to download.\n\n{text}**")
-
-                        try:
-                            input5 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
-                            raw_text5 = input5.text
-                            await input5.delete(True)
-                        except:
-                            await editable.edit("**Timeout! You took too long to respond😢.**")
-                            return
-
-                        if input5.text.isdigit() and 1 <= int(input5.text) <= len(courses):
-                            selected_course_index = int(input5.text.strip())
-                            course = courses[selected_course_index - 1]
-                            selected_batch_id = course['batch_id']
-                            selected_batch_name = course['batch_name']
-                            clean_batch_name = selected_batch_name.replace("/", "-").replace("|", "-")
-                            clean_file_name = f"{user_id}_{clean_batch_name}"
-                        else:
-                            raise Exception("Invalid batch index.")
-                    else:
-                        raise Exception("No batches found for the given search name.")
+                        raise Exception("Invalid batch index.")
                 else:
-                    raise Exception("Invalid input. Please enter a valid index number or 'No'.")
+                    raise Exception("No batches found for the given search name.")
+            else:
+                raise Exception("Invalid input. Please enter a valid index number or 'No'.")
+
+            # selected_batch_id is always the purchased batch's v2 API _id.
+            # No separate PW-internal batchId is needed for purchased batches.
+            selected_batch_pw_id = None
 
             # ==========================================================
             # MENU: 1.Full Batch | 2.Today Class | 3.Khazana | 4.Select Date
@@ -2320,7 +2182,7 @@ async def process_pwwp(bot, m, user_id):
                 "1.```\nFull Batch```\n"
                 "2.```\nToday's Class```\n"
                 "3.```\nKhazana```\n"
-                "4.```\n📅 Select Date (Send Timestamp)```"
+                "4.```\n📅 Select Date```"
             )
 
             try:
@@ -2399,50 +2261,43 @@ async def process_pwwp(bot, m, user_id):
                     raise Exception("No Classes Found Today")
 
             # ==========================================================
-            # OPTION 3: KHAZANA
-            # ==========================================================
-            elif input6.text == '3':
-                raise Exception("Working In Progress")
-
-            # ==========================================================
-            # OPTION 4: SELECT DATE (TIMESTAMP INPUT)
-            # CRITICAL FIX: Now passes batch_pw_id for proper non-purchased
-            # batch support. Enhanced topic extraction prevents "Unknown Topic"
+            # OPTION 4: SELECT DATE (DD/MM/YYYY INPUT)
+            # User picks a specific past date and we extract every class
+            # scheduled on that day (videos + PDFs) for the purchased batch.
             # ==========================================================
             elif input6.text == '4':
                 await editable.edit(
                     "**📅 Select Date\n\n"
-                    "Send Date Timestamp (in milliseconds):\n\n"
+                    "Send the date in DD/MM/YYYY format:\n\n"
                     "Example:\n"
-                    "```1781717400000```\n\n"
-                    "This will extract all classes from 12:00 AM IST of that date "
-                    "upto the time you specified.**"
+                    "```16/06/2026```\n\n"
+                    "This will extract all classes scheduled on that day "
+                    "(IST), videos & PDFs both.**"
                 )
 
                 try:
                     input7 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
-                    timestamp_input = input7.text.strip()
+                    date_input = input7.text.strip()
                     await input7.delete(True)
                 except:
                     await editable.edit("**Timeout! You took too long to respond😢.**")
                     return
 
-                # Parse timestamp to date range (IST based)
-                start_epoch, end_epoch, target_date, display_date = parse_user_timestamp_to_date_range(timestamp_input)
+                # Parse DD/MM/YYYY to date range (IST based)
+                start_epoch, end_epoch, target_date, display_date = parse_user_date_to_range(date_input)
 
                 if start_epoch is None:
                     await editable.edit(
-                        "**❌ Invalid Timestamp!\n\n"
-                        "Please send a valid numeric timestamp in milliseconds.\n"
-                        "Example: ```1781717400000```**"
+                        "**❌ Invalid Date!\n\n"
+                        "Please send a valid date in DD/MM/YYYY format.\n"
+                        "Example: ```16/06/2026```**"
                     )
                     return
 
-                await editable.edit(f"**📅 Fetching classes for {display_date} (timestamp: {timestamp_input})...**")
+                await editable.edit(f"**📅 Fetching classes for {display_date}...**")
 
-                # CRITICAL FIX: Pass batch_pw_id for non-purchased batch support
                 txt_path, zip_path, total_schedules, error = await process_date_content(
-                    session, selected_batch_id, selected_batch_pw_id, selected_batch_name, start_epoch, end_epoch, target_date, headers, user_id
+                    session, selected_batch_id, selected_batch_name, start_epoch, end_epoch, target_date, headers, user_id
                 )
 
                 if error:
