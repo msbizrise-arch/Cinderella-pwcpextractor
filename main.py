@@ -1182,207 +1182,151 @@ def parse_user_date_to_range(date_str: str):
 # CRITICAL FIX: Fetch schedule for SPECIFIC DATE RANGE
 # Now properly handles purchased batches (single batch _id)
 # ===============================================================
-async def fetch_schedule_by_date_range(session, batch_id, start_epoch, end_epoch, headers):
+# ===============================================================
+# CONFIRMED WORKING: weekly-schedules endpoint (captured from PW Web)
+# GET /v2/batches/{batchId}/weekly-schedules
+# params: batchId, batchSubjectId (empty = ALL subjects), startDate, endDate (YYYY-MM-DD), page
+# This single endpoint returns BOTH lecture and notes items already
+# scoped to the exact date range - no more guessing across v1/v2/v3.
+# ===============================================================
+async def fetch_weekly_schedules(session, batch_id, date_str_iso, headers):
     """
-    Fetch scheduled classes for a date range from PW API.
-    Tries v1 -> v2 -> v3 schedule endpoints, then falls back to
-    filtering todays-schedule if the date range covers today.
+    Fetch the schedule for ONE specific day (YYYY-MM-DD, IST calendar date)
+    using the confirmed-working weekly-schedules endpoint.
+    Returns a flat list of normalized schedule items:
+        {
+            "type": "LECTURE" | "NOTES",
+            "schedule_id": str,
+            "subject_id": str,        # batchSubjectId
+            "topic": str,
+            "start_time": str,        # ISO datetime string from API
+            "raw": dict                # full raw item, for reference
+        }
     """
-    all_schedules = []
+    normalized = []
+    page = 1
 
-    # Strategy 1: v1 schedule endpoint
-    try:
-        url = f"https://api.penpencil.co/v1/batches/{batch_id}/schedule"
+    while page <= 20:  # safety limit
+        url = f"https://api.penpencil.co/v2/batches/{batch_id}/weekly-schedules"
         params = {
-            "startDate": start_epoch,
-            "endDate": end_epoch,
-            "page": 1
+            "batchId": batch_id,
+            "batchSubjectId": "",   # empty = all subjects in one call
+            "startDate": date_str_iso,
+            "endDate": date_str_iso,
+            "page": page
         }
+
         data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-        if data and data.get("data"):
-            items = data["data"]
-            if isinstance(items, list):
-                for item in items:
-                    item["_source"] = "v1-schedule"
-                all_schedules.extend(items)
-                logging.info(f"v1/schedule succeeded: {len(items)} items")
-                return all_schedules
-            elif isinstance(items, dict) and items.get("data"):
-                for item in items["data"]:
-                    item["_source"] = "v1-schedule"
-                all_schedules.extend(items["data"])
-                logging.info(f"v1/schedule succeeded: {len(items['data'])} items")
-                return all_schedules
-    except Exception as e:
-        logging.warning(f"v1/schedule failed: {e}")
+        if not data or not data.get("success") or not data.get("data"):
+            break
 
-    # Strategy 2: v2 schedule endpoint
-    try:
-        url = f"https://api.penpencil.co/v2/batches/{batch_id}/schedule"
-        params = {
-            "startDate": start_epoch,
-            "endDate": end_epoch,
-            "page": 1
-        }
-        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-        if data and data.get("data"):
-            items = data["data"]
-            if isinstance(items, list):
-                for item in items:
-                    item["_source"] = "v2-schedule"
-                all_schedules.extend(items)
-                logging.info(f"v2/schedule succeeded: {len(items)} items")
-                return all_schedules
-            elif isinstance(items, dict) and items.get("data"):
-                for item in items["data"]:
-                    item["_source"] = "v2-schedule"
-                all_schedules.extend(items["data"])
-                logging.info(f"v2/schedule succeeded: {len(items['data'])} items")
-                return all_schedules
-    except Exception as e:
-        logging.warning(f"v2/schedule failed: {e}")
+        items = data["data"]
+        if not items:
+            break
 
-    # Strategy 3: v3 schedule endpoint
-    try:
-        url = f"https://api.penpencil.co/v3/batches/{batch_id}/schedule"
-        params = {
-            "startDate": start_epoch,
-            "endDate": end_epoch,
-            "page": 1
-        }
-        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-        if data and data.get("data"):
-            items = data["data"]
-            if isinstance(items, list):
-                for item in items:
-                    item["_source"] = "v3-schedule"
-                all_schedules.extend(items)
-                logging.info(f"v3/schedule succeeded: {len(items)} items")
-                return all_schedules
-            elif isinstance(items, dict) and items.get("data"):
-                for item in items["data"]:
-                    item["_source"] = "v3-schedule"
-                all_schedules.extend(items["data"])
-                logging.info(f"v3/schedule succeeded: {len(items['data'])} items")
-                return all_schedules
-    except Exception as e:
-        logging.warning(f"v3/schedule failed: {e}")
+        for item in items:
+            item_type = item.get("type", "")
+            schedule_id = item.get("_id", "")
 
-    # Strategy 4: todays-schedule, filtered by date range (covers "today" selections)
-    try:
-        url = f"https://api.penpencil.co/v2/batches/{batch_id}/todays-schedule"
-        data = await fetch_pwwp_data(session, url, headers=headers)
-        if data and data.get("data"):
-            items = data["data"]
-            if isinstance(items, list):
-                for item in items:
-                    item_start = item.get("startTime", item.get("startDate", 0))
-                    try:
-                        if item_start and start_epoch <= int(item_start) <= end_epoch:
-                            item["_source"] = "todays-schedule"
-                            all_schedules.append(item)
-                    except (ValueError, TypeError):
-                        item["_source"] = "todays-schedule"
-                        all_schedules.append(item)
-                if all_schedules:
-                    logging.info(f"todays-schedule succeeded: {len(all_schedules)} items")
-                    return all_schedules
-    except Exception as e:
-        logging.warning(f"todays-schedule failed: {e}")
+            if item_type == "LECTURE":
+                details = item.get("videoDetails", {}) or {}
+            elif item_type == "NOTES":
+                details = item.get("notesDetails", {}) or {}
+            else:
+                # Unknown type - try both common containers, skip if neither exists
+                details = item.get("videoDetails") or item.get("notesDetails") or {}
 
-    return all_schedules
+            subject_id = details.get("batchSubjectId", "")
+            topic = safe_topic(details.get("topic"), "Unknown Topic")
+            start_time = details.get("startTime", "")
+
+            normalized.append({
+                "type": item_type,
+                "schedule_id": schedule_id,
+                "subject_id": subject_id,
+                "topic": topic,
+                "start_time": start_time,
+                "raw": item
+            })
+
+        # weekly-schedules doesn't reliably send hasMore - stop once a page
+        # returns fewer than a typical full page, or just rely on empty next page
+        if len(items) < 20:
+            break
+        page += 1
+
+    return normalized
 
 
 # ===============================================================
-# CONTENT-BASED fallback: Fetch schedule via subject contents
-# Works when schedule endpoints fail
+# For each matched schedule item on the target date, fetch the FULL
+# schedule-details (v1 - confirmed working, same as Full Batch /
+# Today's Class) to get the actual playable video URL (master.mpd),
+# DRM keys, and parentId/childId/videoId - plus PDF attachments.
 # ===============================================================
-async def fetch_schedule_via_contents(session, batch_id, start_epoch, end_epoch, headers):
+async def fetch_date_schedule_details(session, batch_id, subject_id, schedule_id, topic, headers, dedup):
     """
-    Fallback: Get batch subjects -> fetch all contents -> filter by date.
+    Fetch schedule-details for ONE schedule item and extract video + notes lines.
+    Mirrors the proven logic used in Full Batch / Today's Class (v1 endpoint).
+    Returns (video_lines, notes_lines)
     """
-    all_items = []
+    video_lines = []
+    notes_lines = []
 
-    subjects = []
-    try:
-        detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/details"
-        batch_resp = await fetch_pwwp_data(session, detail_url, headers=headers)
-        if batch_resp and batch_resp.get("success") and batch_resp.get("data"):
-            subjects = batch_resp.get("data", {}).get("subjects", [])
-            if subjects:
-                logging.info(f"Fetched {len(subjects)} subjects for date-content fallback")
-    except Exception as e:
-        logging.warning(f"Failed to fetch subjects: {e}")
+    if not subject_id or not schedule_id or str(subject_id).lower() == "none":
+        return video_lines, notes_lines
 
-    if not subjects:
-        logging.error("No subjects found for batch")
-        return []
+    url = f"https://api.penpencil.co/v1/batches/{batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
+    data = await fetch_pwwp_data(session, url, headers=headers)
 
-    for subject in subjects:
-        subject_id = subject.get("_id")
-        if not subject_id:
-            continue
+    if not data or not data.get("success") or not data.get("data"):
+        return video_lines, notes_lines
 
-        # Get chapters for this subject
-        chapters = []
-        try:
-            page = 1
-            while page <= 20:
-                url = f"https://api.penpencil.co/v2/batches/{batch_id}/subject/{subject_id}/topics?page={page}"
-                data = await fetch_pwwp_data(session, url, headers=headers)
-                if data and data.get("data"):
-                    chapters.extend(data["data"])
-                    if len(data["data"]) < 20:
-                        break
-                    page += 1
-                else:
-                    break
-        except Exception as e:
-            logging.warning(f"Failed to fetch chapters: {e}")
+    detail_item = data["data"]
 
-        # For each chapter, fetch contents and filter by date
-        for chapter in chapters:
-            chapter_id = chapter.get("_id", "")
-            if not chapter_id:
-                continue
+    # --- VIDEO EXTRACTION (master.mpd + parentId/childId/videoId + DRM) ---
+    video_details = detail_item.get("videoDetails", {})
+    if video_details:
+        parent_id, child_id, vid = extract_pw_ids(
+            video_details=video_details,
+            schedule_data=detail_item,
+            schedule_id=schedule_id,
+            batch_id=batch_id
+        )
+        vurl, drm = extract_comprehensive_video_url(video_details, parent_id, child_id, vid)
+        if vurl:
+            line = f"{topic}:{vurl}{drm}"
+            if dedup.add_and_check_unique(line):
+                video_lines.append(line)
 
-            for content_type in ['videos', 'notes', 'DppNotes', 'DppVideos']:
-                try:
-                    page = 1
-                    while page <= 20:
-                        url = f"https://api.penpencil.co/v2/batches/{batch_id}/subject/{subject_id}/contents"
-                        params = {
-                            "tag": chapter_id,
-                            "contentType": content_type,
-                            "page": page
-                        }
-                        data = await fetch_pwwp_data(session, url, headers=headers, params=params)
-                        if not data or not data.get("data"):
-                            break
+    # --- NOTES / PDF EXTRACTION ---
+    homework_ids = detail_item.get("homeworkIds", [])
+    for hw in homework_ids:
+        hw_topic = safe_topic(hw.get("topic"), topic)
+        for att in hw.get("attachmentIds", []):
+            base_url = att.get("baseUrl", "")
+            key = att.get("key", "")
+            name = safe_topic(att.get("name"), hw_topic)
+            if base_url and key:
+                line = f"{name}:{base_url}{key}"
+                if dedup.add_and_check_unique(line):
+                    notes_lines.append(line)
 
-                        items = data["data"]
-                        for item in items:
-                            # Check if item's startTime falls within range
-                            item_start = item.get("startTime", item.get("startDate", 0))
-                            if item_start:
-                                try:
-                                    item_start_ms = int(item_start)
-                                    if start_epoch <= item_start_ms <= end_epoch:
-                                        item["_contentType"] = content_type
-                                        item["_subjectId"] = subject_id
-                                        item["_batchId"] = batch_id
-                                        item["_source"] = "content-filter"
-                                        all_items.append(item)
-                                except (ValueError, TypeError):
-                                    pass
+    # --- DPP NOTES (only from dpp.homeworkIds) ---
+    dpp = detail_item.get("dpp")
+    if dpp:
+        for hw in dpp.get("homeworkIds", []):
+            hw_topic = safe_topic(hw.get("topic"), topic)
+            for att in hw.get("attachmentIds", []):
+                base_url = att.get("baseUrl", "")
+                key = att.get("key", "")
+                name = safe_topic(att.get("name"), hw_topic)
+                if base_url and key:
+                    line = f"{name}:{base_url}{key}"
+                    if dedup.add_and_check_unique(line):
+                        notes_lines.append(line)
 
-                        if not data.get("hasMore", True) or len(items) < 20:
-                            break
-                        page += 1
-                except Exception as e:
-                    logging.warning(f"Content fetch failed for {content_type}: {e}")
-
-    return all_items
+    return video_lines, notes_lines
 
 
 # ===============================================================
@@ -1498,12 +1442,18 @@ def extract_subject_id_from_schedule_item(schedule_item: dict) -> str:
 # ===============================================================
 async def process_date_content(session, batch_id, batch_name, start_epoch, end_epoch, target_date, headers, user_id):
     """
-    Process content extraction for a specific date range.
-    start_epoch = 12:00 AM IST of the target day
-    end_epoch   = 11:59:59.999 PM IST of the target day
+    Process content extraction for a specific date (DD/MM/YYYY input from user).
+    target_date is the IST calendar date in YYYY-MM-DD format.
+
+    Flow (confirmed-working endpoints):
+      1. weekly-schedules  -> discover every LECTURE/NOTES item on that exact date
+      2. schedule-details  -> (v1, same as Full Batch / Today's Class) fetch the
+                               actual master.mpd video URL + parentId/childId/videoId
+                               + DRM keys, and PDF attachments for each item found
+
     Returns: (txt_path, zip_path, total_schedules, error_msg)
     """
-    # Get batch details for subjects
+    # Get batch details for subjects (used to build a subject_id -> name lookup)
     subjects = []
     try:
         detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/details"
@@ -1518,175 +1468,62 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
     if not subjects:
         return None, None, 0, "Failed to fetch batch details"
 
-    # Fetch schedule for the date range (try multiple strategies)
-    schedules = await fetch_schedule_by_date_range(session, batch_id, start_epoch, end_epoch, headers)
-
-    # If no schedules found, try content-based fallback
-    if not schedules:
-        logging.info("No schedules from endpoint, trying content-based fallback")
-        schedules = await fetch_schedule_via_contents(session, batch_id, start_epoch, end_epoch, headers)
-
-    if not schedules:
-        return None, None, 0, f"No classes scheduled for {target_date}"
-
-    # Build subject lookup
+    # Build subject lookup: batchSubjectId (the "_id" of the subject-batch mapping) -> name
     subject_map = {}
     for subj in subjects:
         sid = subj.get("_id")
-        sname = safe_topic(subj.get("subject"), "Unknown")
+        sname = safe_topic(subj.get("subject"), "Unknown Subject")
         subject_map[sid] = sname
 
-    # Process each scheduled item
+    # Step 1: Discover all schedule items for this exact date
+    schedule_items = await fetch_weekly_schedules(session, batch_id, target_date, headers)
+
+    if not schedule_items:
+        return None, None, 0, f"No classes scheduled for {target_date}"
+
+    # Step 2: For each item, fetch full schedule-details (video URL + PDFs)
     all_urls = []
     structured_data = {}
     dedup = ContentDeduplicator()
 
     clean_batch_name = batch_name.replace('/', '_').replace(':', '_').replace('|', '_').replace('?', '_')
 
-    for schedule_item in schedules:
-        # CRITICAL FIX: Use enhanced subject_id extraction
-        subject_id = extract_subject_id_from_schedule_item(schedule_item)
+    detail_tasks = []
+    for item in schedule_items:
+        detail_tasks.append(
+            fetch_date_schedule_details(
+                session, batch_id, item["subject_id"], item["schedule_id"], item["topic"], headers, dedup
+            )
+        )
 
-        # Fallback: try old method if enhanced returns empty
-        if not subject_id:
-            raw_subject = schedule_item.get("subject", "")
-            if isinstance(raw_subject, list) and raw_subject:
-                first = raw_subject[0]
-                subject_id = first.get("_id", "") if isinstance(first, dict) else str(first)
-            elif isinstance(raw_subject, dict):
-                subject_id = raw_subject.get("_id", "")
-            else:
-                subject_id = str(raw_subject) if raw_subject else ""
+    detail_results = await asyncio.gather(*detail_tasks)
 
-        if not subject_id:
-            subject_id = schedule_item.get("subjectId", "") or schedule_item.get("batchSubjectId", "")
+    for item, (video_lines, notes_lines) in zip(schedule_items, detail_results):
+        # Primary: lookup via batch/details subjects list
+        subject_name = subject_map.get(item["subject_id"], "")
 
-        schedule_id = schedule_item.get("_id", "")
-
-        # CRITICAL FIX: Use enhanced topic extraction (checks 20+ fields)
-        topic = extract_topic_from_schedule_item(schedule_item)
-
-        start_time = schedule_item.get("startTime", schedule_item.get("startDate", ""))
-        end_time_val = schedule_item.get("endTime", schedule_item.get("endDate", ""))
-
-        # CRITICAL FIX: Use safe_topic for subject_name too
-        subject_name = subject_map.get(str(subject_id), "")
+        # Fallback: weekly-schedules itself embeds a subjectId.name field
+        # on each raw item - use it if the primary lookup missed
         if not subject_name:
-            raw_subject = schedule_item.get("subject", "")
-            if isinstance(raw_subject, dict):
-                subject_name = safe_topic(raw_subject.get("subject") or raw_subject.get("name"), "")
-            if not subject_name:
-                subject_name = safe_topic(schedule_item.get("subjectName"), "Unknown Subject")
+            raw = item.get("raw", {})
+            raw_details = raw.get("videoDetails") or raw.get("notesDetails") or {}
+            raw_subject = raw_details.get("subjectId", {})
+            if isinstance(raw_subject, dict) and raw_subject.get("name"):
+                subject_name = safe_topic(raw_subject.get("name"), "")
+
+        if not subject_name:
+            subject_name = "Unknown Subject"
 
         if subject_name not in structured_data:
             structured_data[subject_name] = []
 
-        # Fetch schedule-details for video URL
-        video_lines = []
-        notes_lines = []
-
-        # CRITICAL FIX: Only call schedule-details if we have valid string IDs
-        # Skip if subject_id is None or empty to prevent 404 errors
-        if subject_id and schedule_id and isinstance(subject_id, str) and isinstance(schedule_id, str) and subject_id.lower() != "none":
-            try:
-                detail_url = f"https://api.penpencil.co/v3/batches/{batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
-                detail_data = await fetch_pwwp_data(session, detail_url, headers=headers)
-
-                if detail_data and detail_data.get("data"):
-                    detail_item = detail_data["data"]
-
-                    # CRITICAL FIX: Always use comprehensive extractor with IDs first
-                    video_details = detail_item.get('videoDetails', {})
-                    parent_id, child_id, vid = extract_pw_ids(
-                        video_details=video_details,
-                        schedule_data=detail_item,
-                        schedule_id=schedule_id,
-                        batch_id=batch_id
-                    )
-
-                    # Method 1: Comprehensive extractor (PRIMARY - always with IDs)
-                    vurl, drm = extract_comprehensive_video_url(video_details, parent_id, child_id, vid)
-                    if vurl:
-                        video_lines.append(f"{topic}:{vurl}{drm}")
-
-                    # Method 2: Fallback using extract_video_data_from_schedule with IDs
-                    if not video_lines:
-                        video_info = extract_video_data_from_schedule(detail_data)
-                        fallback_lines = format_video_line(topic, video_info, parent_id, child_id, vid)
-                        video_lines.extend(fallback_lines)
-
-                    # Extract notes with deduplication
-                    for hw in detail_item.get('homeworkIds', []):
-                        for att in hw.get('attachmentIds', []):
-                            # CRITICAL FIX: Use safe_topic for note names
-                            name = safe_topic(att.get('name'), topic)
-                            base_url = att.get('baseUrl', '')
-                            key = att.get('key', '')
-                            if base_url and key:
-                                nline = f"{name}:{base_url}{key}"
-                                if dedup.add_and_check_unique(nline):
-                                    notes_lines.append(nline)
-
-                    # Extract DPP notes (only from dpp.homeworkIds)
-                    dpp = detail_item.get('dpp')
-                    if dpp:
-                        for hw in dpp.get('homeworkIds', []):
-                            for att in hw.get('attachmentIds', []):
-                                name = safe_topic(att.get('name'), topic)
-                                base_url = att.get('baseUrl', '')
-                                key = att.get('key', '')
-                                if base_url and key:
-                                    nline = f"{name}:{base_url}{key}"
-                                    if dedup.add_and_check_unique(nline):
-                                        notes_lines.append(nline)
-            except Exception as e:
-                logging.warning(f"Error fetching schedule-details: {e}")
-
-        # Fallback: check if schedule item itself has URL
-        if not video_lines:
-            item_url = schedule_item.get('url', '')
-            if item_url:
-                # Append IDs to item URL too
-                final_url = append_video_params(item_url, batch_id, schedule_id, '')
-                video_lines.append(f"{topic}:{final_url}")
-
-        # Also try fallback video extraction from item
-        if not video_lines:
-            vurl, drm = extract_video_from_content_item(schedule_item)
-            if vurl:
-                # Ensure IDs are in fallback URL
-                parent_id_fb = batch_id
-                child_id_fb = schedule_id
-                vid_fb = schedule_item.get('videoId', '') or schedule_item.get('contentId', '')
-                vurl = append_video_params(vurl, parent_id_fb, child_id_fb, vid_fb)
-                video_lines.append(f"{topic}:{vurl}{drm}")
-
-        # CRITICAL FIX: Also try extracting from videoDetails at schedule item level
-        if not video_lines:
-            vd = schedule_item.get('videoDetails', {})
-            if vd:
-                parent_id_vd, child_id_vd, vid_vd = extract_pw_ids(
-                    video_details=vd,
-                    schedule_data=schedule_item,
-                    schedule_id=schedule_id,
-                    batch_id=batch_id
-                )
-                vurl, drm = extract_comprehensive_video_url(vd, parent_id_vd, child_id_vd, vid_vd)
-                if vurl:
-                    video_lines.append(f"{topic}:{vurl}{drm}")
-
-        # Apply deduplication to videos too
-        for vline in video_lines:
-            if dedup.add_and_check_unique(vline):
-                all_urls.append(vline)
-        for nline in notes_lines:
-            if dedup.add_and_check_unique(nline):
-                all_urls.append(nline)
+        all_urls.extend(video_lines)
+        all_urls.extend(notes_lines)
 
         structured_data[subject_name].append({
-            "topic": topic,
-            "start_time": start_time,
-            "end_time": end_time_val,
+            "topic": item["topic"],
+            "start_time": item["start_time"],
+            "end_time": item["start_time"],
             "videos": video_lines,
             "notes": notes_lines
         })
@@ -1702,7 +1539,7 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
             f.write(f"\n--- {subject_name} ---\n")
             for item in items:
                 f.write(f"\nTopic: {item['topic']}\n")
-                f.write(f"Time: {item['start_time']} - {item['end_time']}\n")
+                f.write(f"Time: {item['start_time']}\n")
                 if item["videos"]:
                     f.write("\n[Videos]\n")
                     f.write("\n".join(item["videos"]) + "\n")
@@ -1734,16 +1571,16 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
         json_data[batch_name][subject_name] = {}
         for item in items:
             topic_key = f"{item['topic']} ({item['start_time']})"
-            json_data[batch_name][topic_key] = {
+            json_data[batch_name][subject_name][topic_key] = {
                 "videos": item["videos"],
                 "notes": item["notes"]
             }
     json_data[batch_name]["date"] = target_date
-    json_data[batch_name]["total_schedules"] = len(schedules)
+    json_data[batch_name]["total_schedules"] = len(schedule_items)
     with open(json_path, 'w') as f:
         json.dump(json_data, f, indent=4)
 
-    return txt_path, zip_path, len(schedules), None
+    return txt_path, zip_path, len(schedule_items), None
 
 
 # ===============================================================
@@ -1753,7 +1590,8 @@ async def process_date_content(session, batch_id, batch_name, start_epoch, end_e
 # CRITICAL FIX: Skips items with None subject_id to prevent 404
 # ===============================================================
 async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSession, selected_batch_id, subject_id, schedule_id, headers: Dict) -> List[str]:
-    """Fetch content details for a single today's schedule item."""
+    """Fetch content details for a single today's schedule item.
+    Uses v1 schedule-details endpoint (confirmed working)."""
     content = []
 
     # CRITICAL FIX: Skip if subject_id is None or invalid
@@ -1761,7 +1599,7 @@ async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSessio
         logging.warning(f"Skipping schedule {schedule_id}: subject_id is None/invalid")
         return content
 
-    url = f"https://api.penpencil.co/v2/batches/{selected_batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
+    url = f"https://api.penpencil.co/v1/batches/{selected_batch_id}/subject/{subject_id}/schedule/{schedule_id}/schedule-details"
     data = await fetch_pwwp_data(session, url, headers)
 
     if data and data.get("success") and data.get("data"):
@@ -1816,26 +1654,15 @@ async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSessio
 
 
 # ===============================================================
-# CRITICAL FIX: Today's schedule now tries both batch IDs
-# and filters out items with invalid subject_id
+# Today's schedule using the CONFIRMED WORKING v1 endpoint
+# (matches the proven pww.py implementation)
 # ===============================================================
 async def get_pwwp_all_todays_schedule_content(session: aiohttp.ClientSession, selected_batch_id: str, batch_pw_id: str, headers: Dict) -> List[str]:
-    """Fetch all of today's schedule content using the working v2 endpoint."""
+    """Fetch all of today's schedule content using the working v1 endpoint."""
     all_content = []
 
-    # Try with _id first, then batchId
-    todays_schedule_details = None
-    for bid, label in [(selected_batch_id, "_id"), (batch_pw_id, "batchId")]:
-        if not bid:
-            continue
-        try:
-            url = f"https://api.penpencil.co/v2/batches/{bid}/todays-schedule"
-            todays_schedule_details = await fetch_pwwp_data(session, url, headers)
-            if todays_schedule_details and todays_schedule_details.get("success") and todays_schedule_details.get("data"):
-                logging.info(f"todays-schedule succeeded with {label}={bid}: {len(todays_schedule_details['data'])} items")
-                break
-        except Exception as e:
-            logging.warning(f"todays-schedule failed with {label}={bid}: {e}")
+    url = f"https://api.penpencil.co/v1/batches/{selected_batch_id}/todays-schedule"
+    todays_schedule_details = await fetch_pwwp_data(session, url, headers)
 
     if todays_schedule_details and todays_schedule_details.get("success") and todays_schedule_details.get("data"):
         tasks = []
@@ -1858,7 +1685,7 @@ async def get_pwwp_all_todays_schedule_content(session: aiohttp.ClientSession, s
             results = await asyncio.gather(*tasks)
             for result in results:
                 all_content.extend(result)
-        
+
         if not valid_items:
             logging.warning("No valid items found (all had None subject_id)")
     else:
