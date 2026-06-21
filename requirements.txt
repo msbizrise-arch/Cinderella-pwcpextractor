@@ -9,3 +9,4 @@ colorama
 PyJWT
 aiogram
 cloudscraper
+Pillow

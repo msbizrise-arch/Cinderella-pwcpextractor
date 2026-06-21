@@ -113,32 +113,120 @@ image_list = [
 print(4321)
 
 # ── Thumbnail for all document files (persistent, survives restarts) ────────
+# IMPORTANT: Telegram's thumb requirement (Pyrogram docs):
+#   - Must be a valid JPEG
+#   - Must be < 200 KB in size
+#   - Width & height must NOT exceed 320px
+# The previous implementation downloaded the raw image with ZERO validation,
+# so if the source image was not a valid/compliant JPEG, Telegram silently
+# dropped the thumbnail (no crash, no error -> looked like "thumbnail nahi
+# lag raha"). It also only ran once at import time with no retry, so a
+# single transient failure on startup left THUMBNAIL_FILE = None forever.
 THUMB_URL = "https://graph.org/file/3caf2c3b92e388a67861e-cdfd456f0fb1187140.jpg"
 THUMB_PATH = "document_thumb.jpg"
+THUMB_MAX_SIDE = 320       # Telegram hard limit
+THUMB_MAX_BYTES = 195 * 1024  # keep a safety margin under the 200KB cap
 
-def ensure_thumbnail_exists():
-    """Ensure thumbnail file exists, download if needed."""
+
+def _process_thumbnail_bytes(raw_bytes: bytes, dest_path: str) -> bool:
+    """Validate + convert + resize arbitrary image bytes into a Telegram-safe
+    JPEG thumbnail at dest_path. Returns True on success."""
     try:
-        if not os.path.exists(THUMB_PATH):
-            logging.info(f"Downloading thumbnail from {THUMB_URL}...")
-            resp = requests.get(THUMB_URL, timeout=10)
-            if resp.status_code == 200:
-                with open(THUMB_PATH, "wb") as f:
-                    f.write(resp.content)
-                logging.info(f"Thumbnail saved to {THUMB_PATH}")
-                return THUMB_PATH
-            else:
-                logging.warning(f"Failed to download thumbnail: status {resp.status_code}")
-                return None
-        else:
-            logging.info(f"Thumbnail already exists at {THUMB_PATH}")
-            return THUMB_PATH
+        from PIL import Image
+        import io
+
+        img = Image.open(io.BytesIO(raw_bytes))
+        img.load()  # force-decode now so corrupt files raise immediately
+
+        # Flatten to RGB (drops alpha/palette issues that break JPEG export)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Resize so neither dimension exceeds Telegram's 320px limit
+        w, h = img.size
+        scale = min(THUMB_MAX_SIDE / w, THUMB_MAX_SIDE / h, 1.0)
+        if scale < 1.0:
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+        # Encode as JPEG, stepping quality down until under the size cap
+        quality = 90
+        buf = io.BytesIO()
+        while quality >= 35:
+            buf.seek(0)
+            buf.truncate(0)
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            if buf.tell() <= THUMB_MAX_BYTES:
+                break
+            quality -= 10
+
+        with open(dest_path, "wb") as f:
+            f.write(buf.getvalue())
+
+        logging.info(
+            f"Thumbnail processed: {img.size[0]}x{img.size[1]}px, "
+            f"{buf.tell() // 1024}KB, quality={quality}"
+        )
+        return True
     except Exception as e:
-        logging.error(f"Thumbnail error: {e}")
+        logging.error(f"Thumbnail processing failed: {e}", exc_info=True)
+        return False
+
+
+def ensure_thumbnail_exists(force: bool = False):
+    """Ensure a Telegram-compliant thumbnail file exists, downloading and
+    re-processing it if needed. Safe to call again later (e.g. before each
+    send) to self-heal if the file ever goes missing or got corrupted."""
+    try:
+        if os.path.exists(THUMB_PATH) and not force:
+            # Sanity-check the cached file still meets Telegram's limits;
+            # if not, fall through and regenerate it instead of trusting it blindly.
+            try:
+                from PIL import Image
+                with Image.open(THUMB_PATH) as im:
+                    w, h = im.size
+                size_ok = os.path.getsize(THUMB_PATH) <= THUMB_MAX_BYTES
+                dim_ok = w <= THUMB_MAX_SIDE and h <= THUMB_MAX_SIDE
+                if size_ok and dim_ok:
+                    return THUMB_PATH
+                logging.warning("Cached thumbnail fails Telegram limits, regenerating...")
+            except Exception:
+                logging.warning("Cached thumbnail unreadable, regenerating...")
+
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                logging.info(f"Downloading thumbnail from {THUMB_URL} (attempt {attempt})...")
+                resp = requests.get(THUMB_URL, timeout=15)
+                if resp.status_code == 200 and resp.content:
+                    if _process_thumbnail_bytes(resp.content, THUMB_PATH):
+                        logging.info(f"Thumbnail saved to {THUMB_PATH}")
+                        return THUMB_PATH
+                    last_error = "processing failed"
+                else:
+                    last_error = f"HTTP {resp.status_code}"
+            except Exception as e:
+                last_error = str(e)
+            time.sleep(1.5)
+
+        logging.warning(f"Failed to prepare thumbnail after 3 attempts: {last_error}")
         return None
+    except Exception as e:
+        logging.error(f"Thumbnail error: {e}", exc_info=True)
+        return None
+
 
 # Ensure thumbnail is ready when bot starts
 THUMBNAIL_FILE = ensure_thumbnail_exists()
+
+
+def get_thumbnail():
+    """Always use this instead of the THUMBNAIL_FILE global directly.
+    Self-heals if the thumbnail is missing/corrupted at send time, so a
+    startup hiccup can't permanently disable thumbnails for the whole run."""
+    global THUMBNAIL_FILE
+    if not THUMBNAIL_FILE or not os.path.exists(THUMBNAIL_FILE):
+        THUMBNAIL_FILE = ensure_thumbnail_exists(force=True)
+    return THUMBNAIL_FILE
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -697,12 +785,19 @@ def deduplicate_by_url_and_title(content_list: List[str]) -> List[str]:
 # LOGGING: Send extraction info to log channel
 # ===============================================================
 async def log_extraction_to_channel(bot, user_id, user_name, user_username, batch_name, token_preview, file_types, message_ids=None, chat_id=None):
-    """Log extraction details to private log channel + forward files."""
+    """Log extraction details to private log channel + forward files.
+
+    NOTE (FIXED BUG): Telegram channel/supergroup IDs are ALWAYS negative
+    (e.g. -1003597599758). The previous guard was `LOG_CHANNEL <= 0: return`,
+    which is True for every valid channel ID -> the function always exited
+    immediately and NEVER logged or forwarded anything, even though the bot
+    was an admin in the channel. The correct check is just "is it unset".
+    """
     try:
-        if not LOG_CHANNEL or LOG_CHANNEL <= 0:
+        if not LOG_CHANNEL or LOG_CHANNEL == 0:
             logging.warning(f"Log channel not configured (value: {LOG_CHANNEL})")
             return
-        
+
         log_text = (
             f"📊 **Extraction Logged**\n\n"
             f"👤 User ID: `{user_id}`\n"
@@ -713,20 +808,38 @@ async def log_extraction_to_channel(bot, user_id, user_name, user_username, batc
             f"📄 Files: {', '.join(file_types)}\n"
             f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
         )
-        
+
         logging.info(f"Attempting to log to channel {LOG_CHANNEL}: {log_text[:50]}...")
-        await bot.send_message(LOG_CHANNEL, log_text, parse_mode="markdown")
-        logging.info(f"Successfully logged extraction to channel {LOG_CHANNEL}")
-        
+        try:
+            await bot.send_message(LOG_CHANNEL, log_text, parse_mode="markdown")
+            logging.info(f"Successfully logged extraction to channel {LOG_CHANNEL}")
+        except FloodWait as e:
+            logging.warning(f"FloodWait on log text, sleeping {e.value}s")
+            await asyncio.sleep(e.value)
+            await bot.send_message(LOG_CHANNEL, log_text, parse_mode="markdown")
+        except Exception as e:
+            # Don't let a failed text log block file forwarding below
+            logging.error(f"Could not send log text to {LOG_CHANNEL}: {e}", exc_info=True)
+
         # Forward all sent files to log channel
         if message_ids and chat_id:
+            forwarded = 0
             for msg_id in message_ids:
                 try:
                     await bot.copy_message(LOG_CHANNEL, chat_id, msg_id)
+                    forwarded += 1
                     await asyncio.sleep(0.5)
+                except FloodWait as e:
+                    logging.warning(f"FloodWait while forwarding msg {msg_id}, sleeping {e.value}s")
+                    await asyncio.sleep(e.value)
+                    try:
+                        await bot.copy_message(LOG_CHANNEL, chat_id, msg_id)
+                        forwarded += 1
+                    except Exception as e2:
+                        logging.warning(f"Retry failed forwarding message {msg_id} to log channel: {e2}")
                 except Exception as e:
-                    logging.warning(f"Failed to forward message {msg_id} to log channel: {e}")
-            logging.info(f"Forwarded {len(message_ids)} files to log channel {LOG_CHANNEL}")
+                    logging.warning(f"Failed to forward message {msg_id} to log channel: {e}", exc_info=True)
+            logging.info(f"Forwarded {forwarded}/{len(message_ids)} files to log channel {LOG_CHANNEL}")
     except Exception as e:
         logging.error(f"Failed to log extraction to channel {LOG_CHANNEL}: {e}", exc_info=True)
 
@@ -734,6 +847,43 @@ async def log_extraction_to_channel(bot, user_id, user_name, user_username, batc
 # ===============================================================
 # HTML GENERATION from JSON data
 # ===============================================================
+def _html_escape(text: str) -> str:
+    """Escape text for safe insertion into HTML body content."""
+    text = "" if text is None else str(text)
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+    )
+
+
+def _js_attr_escape(text: str) -> str:
+    """Escape text for safe insertion inside a single-quoted JS string that
+    itself sits inside an HTML onclick="..." attribute.
+
+    FIXED BUG: the previous template interpolated raw titles/URLs straight
+    into onclick="openVideoPlayer('TITLE', 'URL')". Any apostrophe, quote,
+    backslash, or newline in a title (e.g. "Newton's Laws") or in a token-
+    bearing CDN URL silently broke the JS string literal, which made the
+    Play / View / Copy buttons do nothing when clicked. Escaping backslash,
+    single quote, double quote and newlines here, then also HTML-escaping
+    the result (because it sits inside an HTML attribute) fixes every
+    Play/Download/Copy/View button across both the per-chapter lists and
+    the "All Videos" / "All PDFs" grids.
+    """
+    text = "" if text is None else str(text)
+    text = (
+        text.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace('"', '\\"')
+            .replace("\n", " ")
+            .replace("\r", " ")
+    )
+    # The result still needs to be HTML-attribute-safe since it's inside onclick="..."
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -> str:
     """Generate luxury HTML study page from JSON content data with inline video player & PDF viewer."""
     
@@ -762,18 +912,30 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
                     title = item.get('title', 'Untitled')
                     url = item.get('url', '#')
                     item_type = item.get('type', 'file').lower()
-                    
+
+                    # Pre-computed safe variants used everywhere in the template:
+                    #   *_safe   -> HTML-escaped, for visible text content
+                    #   *_js     -> JS+HTML escaped, for use inside onclick='...'
+                    entry = {
+                        'title': title,
+                        'url': url,
+                        'title_safe': _html_escape(title),
+                        'title_js': _js_attr_escape(title),
+                        'url_js': _js_attr_escape(url),
+                    }
+
                     if any(v in item_type for v in ['video', 'mpd', 'm3u8']):
-                        video_items.append({'title': title, 'url': url})
-                        all_videos.append({'title': title, 'url': url, 'subject': subject_name, 'chapter': chapter_name})
+                        video_items.append(entry)
+                        all_videos.append({**entry, 'subject': subject_name, 'chapter': chapter_name})
                     elif 'pdf' in item_type:
-                        pdf_items.append({'title': title, 'url': url})
-                        all_pdfs.append({'title': title, 'url': url, 'subject': subject_name, 'chapter': chapter_name})
+                        pdf_items.append(entry)
+                        all_pdfs.append({**entry, 'subject': subject_name, 'chapter': chapter_name})
                     else:
-                        other_items.append({'title': title, 'url': url, 'type': item_type})
+                        other_items.append({**entry, 'type': item_type})
                 
                 chapter_sections.append({
                     'name': chapter_name,
+                    'name_safe': _html_escape(chapter_name),
                     'videos': video_items,
                     'pdfs': pdf_items,
                     'others': other_items
@@ -781,6 +943,7 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
             
             subject_sections.append({
                 'name': subject_name,
+                'name_safe': _html_escape(subject_name),
                 'chapters': chapter_sections
             })
     
@@ -792,6 +955,12 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
     <title>{batch_name} - Study Hub</title>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- FIXED: a plain <video><source type="application/dash+xml"> tag CANNOT
+         play .mpd/.m3u8 streaming manifests in any browser - that's why
+         videos never played. dash.js + hls.js add real MSE-based playback
+         for DASH (.mpd) and HLS (.m3u8) sources respectively. -->
+    <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
     <style>
         :root {{
             --primary: #ff6b35;
@@ -1196,7 +1365,7 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
         html += f"""                <div class="subject-section" id="{subj_id}">
                     <div class="subject-header" onclick="toggleChapter(this)">
                         <i class="fas fa-book-open"></i>
-                        <h2>{subj['name']}</h2>
+                        <h2>{subj['name_safe']}</h2>
                         <span style="color: var(--text-muted); font-size: 0.8em;">
                             <i class="fas fa-play-circle"></i> {total_vids} &nbsp;
                             <i class="fas fa-file-pdf"></i> {total_pdfs} &nbsp;
@@ -1214,7 +1383,7 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
             html += f"""                        <div class="chapter-section" id="{ch_id}">
                             <div class="chapter-header" onclick="toggleContent(this)">
                                 <i class="fas fa-folder-open"></i>
-                                <h3>{ch['name']}</h3>
+                                <h3>{ch['name_safe']}</h3>
                                 <span class="count">{total_items} items</span>
                                 <span class="toggle-icon" style="width:26px;height:26px;font-size:0.8em;"><i class="fas fa-chevron-down"></i></span>
                             </div>
@@ -1228,10 +1397,10 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
                 for vidx, vid in enumerate(ch['videos']):
                     html += f"""                                    <div class="content-item video">
                                         <div class="icon"><i class="fas fa-play"></i></div>
-                                        <span class="title">{vid['title']}</span>
+                                        <span class="title">{vid['title_safe']}</span>
                                         <div class="actions">
-                                            <button class="btn btn-primary" onclick="openVideoPlayer('{vid['title']}', '{vid['url']}')"><i class="fas fa-play"></i> Play</button>
-                                            <button class="btn btn-secondary" onclick="copyToClipboard('{vid['url']}')"><i class="fas fa-copy"></i></button>
+                                            <button class="btn btn-primary" onclick="openVideoPlayer('{vid['title_js']}', '{vid['url_js']}')"><i class="fas fa-play"></i> Play</button>
+                                            <button class="btn btn-secondary" onclick="copyToClipboard('{vid['url_js']}')"><i class="fas fa-copy"></i></button>
                                         </div>
                                     </div>
 """
@@ -1246,10 +1415,10 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
                 for pdf in ch['pdfs']:
                     html += f"""                                    <div class="content-item pdf">
                                         <div class="icon"><i class="fas fa-file-pdf"></i></div>
-                                        <span class="title">{pdf['title']}</span>
+                                        <span class="title">{pdf['title_safe']}</span>
                                         <div class="actions">
-                                            <button class="btn btn-success" onclick="openPdfViewer('{pdf['title']}', '{pdf['url']}')"><i class="fas fa-eye"></i> View</button>
-                                            <button class="btn btn-secondary" onclick="copyToClipboard('{pdf['url']}')"><i class="fas fa-copy"></i></button>
+                                            <button class="btn btn-success" onclick="openPdfViewer('{pdf['title_js']}', '{pdf['url_js']}')"><i class="fas fa-eye"></i> View</button>
+                                            <button class="btn btn-secondary" onclick="copyToClipboard('{pdf['url_js']}')"><i class="fas fa-copy"></i></button>
                                         </div>
                                     </div>
 """
@@ -1264,10 +1433,10 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
                 for oth in ch['others']:
                     html += f"""                                    <div class="content-item file">
                                         <div class="icon"><i class="fas fa-file-alt"></i></div>
-                                        <span class="title">{oth['title']}</span>
+                                        <span class="title">{oth['title_safe']}</span>
                                         <div class="actions">
                                             <a href="{oth['url']}" target="_blank" class="btn btn-secondary"><i class="fas fa-download"></i> Open</a>
-                                            <button class="btn btn-secondary" onclick="copyToClipboard('{oth['url']}')"><i class="fas fa-copy"></i></button>
+                                            <button class="btn btn-secondary" onclick="copyToClipboard('{oth['url_js']}')"><i class="fas fa-copy"></i></button>
                                         </div>
                                     </div>
 """
@@ -1297,13 +1466,13 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
     
     for vid in all_videos:
         html += f"""                            <div class="grid-item">
-                                <div class="g-title"><i class="fas fa-play-circle" style="color: var(--primary);"></i> {vid['title']}</div>
+                                <div class="g-title"><i class="fas fa-play-circle" style="color: var(--primary);"></i> {vid['title_safe']}</div>
                                 <div style="font-size: 0.72em; color: var(--text-muted); margin-bottom: 10px;">
-                                    <i class="fas fa-book"></i> {vid['subject']} &nbsp; <i class="fas fa-folder"></i> {vid['chapter']}
+                                    <i class="fas fa-book"></i> {_html_escape(vid['subject'])} &nbsp; <i class="fas fa-folder"></i> {_html_escape(vid['chapter'])}
                                 </div>
                                 <div class="g-actions">
-                                    <button class="btn btn-primary" onclick="openVideoPlayer('{vid['title']}', '{vid['url']}')"><i class="fas fa-play"></i> Play</button>
-                                    <button class="btn btn-secondary" onclick="copyToClipboard('{vid['url']}')"><i class="fas fa-copy"></i></button>
+                                    <button class="btn btn-primary" onclick="openVideoPlayer('{vid['title_js']}', '{vid['url_js']}')"><i class="fas fa-play"></i> Play</button>
+                                    <button class="btn btn-secondary" onclick="copyToClipboard('{vid['url_js']}')"><i class="fas fa-copy"></i></button>
                                 </div>
                             </div>
 """
@@ -1326,13 +1495,13 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
     
     for pdf in all_pdfs:
         html += f"""                            <div class="grid-item">
-                                <div class="g-title"><i class="fas fa-file-pdf" style="color: var(--success);"></i> {pdf['title']}</div>
+                                <div class="g-title"><i class="fas fa-file-pdf" style="color: var(--success);"></i> {pdf['title_safe']}</div>
                                 <div style="font-size: 0.72em; color: var(--text-muted); margin-bottom: 10px;">
-                                    <i class="fas fa-book"></i> {pdf['subject']} &nbsp; <i class="fas fa-folder"></i> {pdf['chapter']}
+                                    <i class="fas fa-book"></i> {_html_escape(pdf['subject'])} &nbsp; <i class="fas fa-folder"></i> {_html_escape(pdf['chapter'])}
                                 </div>
                                 <div class="g-actions">
-                                    <button class="btn btn-success" onclick="openPdfViewer('{pdf['title']}', '{pdf['url']}')"><i class="fas fa-eye"></i> View</button>
-                                    <button class="btn btn-secondary" onclick="copyToClipboard('{pdf['url']}')"><i class="fas fa-copy"></i></button>
+                                    <button class="btn btn-success" onclick="openPdfViewer('{pdf['title_js']}', '{pdf['url_js']}')"><i class="fas fa-eye"></i> View</button>
+                                    <button class="btn btn-secondary" onclick="copyToClipboard('{pdf['url_js']}')"><i class="fas fa-copy"></i></button>
                                 </div>
                             </div>
 """
@@ -1429,28 +1598,96 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
     }}
     
     // ===== VIDEO PLAYER =====
+    // FIXED: previously this just dropped a <source type="application/dash+xml">
+    // into a plain <video> tag, which NO browser can decode natively - that's
+    // why videos never played. We now detect the stream type from the URL and
+    // attach the correct MSE-based player: dash.js for .mpd, hls.js for
+    // .m3u8, and native playback for everything else (plain mp4 etc).
     let currentVideo = null;
     let isPlaying = false;
     let playInterval = null;
     let currentTime = 0;
     let duration = 0;
-    
+    let dashPlayerInstance = null;
+    let hlsPlayerInstance = null;
+
+    function destroyActivePlayers() {{
+        if (dashPlayerInstance) {{
+            try {{ dashPlayerInstance.reset(); }} catch (e) {{}}
+            dashPlayerInstance = null;
+        }}
+        if (hlsPlayerInstance) {{
+            try {{ hlsPlayerInstance.destroy(); }} catch (e) {{}}
+            hlsPlayerInstance = null;
+        }}
+    }}
+
     function openVideoPlayer(title, url) {{
         document.getElementById('videoTitle').innerHTML = '<i class="fas fa-play-circle" style="color: var(--primary);"></i> ' + escapeHtml(title);
         document.getElementById('videoUrlDisplay').textContent = url;
         document.getElementById('videoModal').classList.add('active');
         document.body.style.overflow = 'hidden';
-        
-        // Create video element
+
+        destroyActivePlayers();
+
+        // Create a fresh, plain <video> element (no <source> tag - the
+        // stream is attached programmatically below based on its type)
         const container = document.getElementById('videoPlayerContainer');
-        container.innerHTML = '<video id="activeVideo" controlsList="nodownload"><source src="' + url + '" type="application/dash+xml"></video>';
-        
+        container.innerHTML = '<video id="activeVideo" controlsList="nodownload" playsinline></video>';
         const video = document.getElementById('activeVideo');
         currentVideo = video;
         isPlaying = false;
         currentTime = 0;
         updatePlayButton();
-        
+
+        const lowerUrl = url.toLowerCase();
+        let loadError = false;
+
+        try {{
+            if (lowerUrl.indexOf('.mpd') !== -1) {{
+                // DASH stream
+                if (window.dashjs) {{
+                    dashPlayerInstance = dashjs.MediaPlayer().create();
+                    dashPlayerInstance.initialize(video, url, false);
+                    dashPlayerInstance.on(dashjs.MediaPlayer.events['ERROR'], function(e) {{
+                        console.warn('dash.js error', e);
+                    }});
+                }} else {{
+                    loadError = true;
+                }}
+            }} else if (lowerUrl.indexOf('.m3u8') !== -1) {{
+                // HLS stream
+                if (window.Hls && Hls.isSupported()) {{
+                    hlsPlayerInstance = new Hls();
+                    hlsPlayerInstance.loadSource(url);
+                    hlsPlayerInstance.attachMedia(video);
+                }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+                    // Safari has native HLS support
+                    video.src = url;
+                }} else {{
+                    loadError = true;
+                }}
+            }} else {{
+                // Plain file (mp4 etc) - native playback works fine
+                video.src = url;
+            }}
+        }} catch (e) {{
+            console.error('Player init failed', e);
+            loadError = true;
+        }}
+
+        if (loadError) {{
+            container.innerHTML = (
+                '<div class="video-placeholder">' +
+                '<i class="fas fa-exclamation-triangle"></i>' +
+                '<p>This browser/connection could not load the stream player.</p>' +
+                '<div class="url-display">' + escapeHtml(url) + '</div>' +
+                '<div class="url-note"><i class="fas fa-info-circle"></i> Copy this URL and open it in VLC, MX Player, or NPlayer instead.</div>' +
+                '</div>'
+            );
+            return;
+        }}
+
         video.addEventListener('timeupdate', function() {{
             currentTime = video.currentTime;
             duration = video.duration || 0;
@@ -1473,14 +1710,19 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
             isPlaying = false;
             updatePlayButton();
         }});
+        video.addEventListener('error', function() {{
+            console.warn('Video element error - stream may be DRM-protected or blocked by CORS.');
+        }});
     }}
     
     function closeVideoPlayer() {{
         const video = document.getElementById('activeVideo');
         if (video) {{
             video.pause();
-            video.src = '';
+            video.removeAttribute('src');
+            video.load();
         }}
+        destroyActivePlayers();
         currentVideo = null;
         isPlaying = false;
         document.getElementById('videoModal').classList.remove('active');
@@ -1553,18 +1795,42 @@ def generate_html_from_json(batch_name: str, json_data: dict, token: str = "") -
     }}
     
     // ===== PDF VIEWER =====
+    // FIXED: Google's docs.google.com/gview embed is widely known to be
+    // unreliable - it randomly fails to load and frequently rejects signed/
+    // token-bearing CDN URLs (exactly what these PDF links are), which is
+    // why "pdf view nahi ho pa raha" was happening. Mozilla's PDF.js viewer
+    // is far more reliable for this. We also add a visible fallback link in
+    // case the iframe still can't load a particular PDF (e.g. strict CORS).
     function openPdfViewer(title, url) {{
         document.getElementById('pdfTitle').innerHTML = '<i class="fas fa-file-pdf" style="color: var(--success);"></i> ' + escapeHtml(title);
-        document.getElementById('pdfFrame').src = 'https://docs.google.com/gview?embedded=1&url=' + encodeURIComponent(url);
+        const viewerUrl = 'https://mozilla.github.io/pdf.js/web/viewer.html?file=' + encodeURIComponent(url);
+        const frame = document.getElementById('pdfFrame');
+        const pdfContainer = document.getElementById('pdfViewerContainer');
+        frame.src = viewerUrl;
         document.getElementById('pdfDownloadBtn').href = url;
         document.getElementById('pdfModal').classList.add('active');
         document.body.style.overflow = 'hidden';
+
+        // If the iframe itself errors out (network/host-level failure),
+        // swap in a direct open/download link so the user isn't stuck with
+        // a blank box instead of a working preview.
+        frame.onerror = function() {{
+            pdfContainer.innerHTML = (
+                '<div class="video-placeholder">' +
+                '<i class="fas fa-exclamation-triangle"></i>' +
+                '<p>Could not preview this PDF in-browser.</p>' +
+                '<a href="' + url + '" target="_blank" class="btn btn-primary" style="margin-top:10px;display:inline-flex;"><i class="fas fa-external-link-alt"></i> Open / Download PDF</a>' +
+                '</div>'
+            );
+        }};
     }}
     
     function closePdfViewer() {{
         document.getElementById('pdfFrame').src = '';
         document.getElementById('pdfModal').classList.remove('active');
         document.body.style.overflow = '';
+        // Restore plain iframe markup in case the error fallback replaced it
+        document.getElementById('pdfViewerContainer').innerHTML = '<iframe id="pdfFrame" src=""></iframe>';
     }}
     
     // ===== UTILITY =====
@@ -3314,7 +3580,7 @@ async def process_pwwp(bot, m, user_id):
                                         document=f,
                                         caption=caption if ext == 'txt' else f"{selected_batch_name} - Study Page",
                                         file_name=f"{selected_batch_name.replace('/', '-').replace('|', '-')}.{ext}",
-                                        thumb=THUMBNAIL_FILE
+                                        thumb=get_thumbnail()
                                     )
                                     sent_message_ids.append(sent_msg.id)
                                 logging.info(f"Sent {ext} file to user")
@@ -3426,7 +3692,7 @@ async def process_pwwp(bot, m, user_id):
                                 document=f,
                                 caption=caption if ext == 'txt' else f"{selected_batch_name} - {ext.upper() if ext != 'html' else 'Study Page'}",
                                 file_name=f"{clean_batch_name}.{ext}",
-                                thumb=THUMBNAIL_FILE
+                                thumb=get_thumbnail()
                             )
                             sent_message_ids.append(doc.id)
                         if ext == 'txt':
