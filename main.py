@@ -3485,7 +3485,7 @@ async def process_pwwp(bot, m, user_id):
                 raw_text6 = input6.text
                 await input6.delete(True)
             except ListenerTimeout:
-                await editable.edit("**Timeout! You took too long to respond😢n\nPlease response under 60 seconds🙂.**")
+                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
                 return
             except Exception as e:
                 logging.exception("Error during option listening:")
@@ -3565,8 +3565,8 @@ async def process_pwwp(bot, m, user_id):
                     "**📅 Select Date\n\n"
                     "Send the date in DD/MM/YYYY format:\n\n"
                     "Example:\n"
-                    "```16/06/2026```\n\n"
-                    "This will extract all classes scheduled on that day "
+                    "16/06/2026\n\n"
+                    "This will extract all classes scheduled on 16 june 2026. "
                     "(IST), videos & PDFs both.**"
                 )
 
@@ -3575,7 +3575,7 @@ async def process_pwwp(bot, m, user_id):
                     date_input = input7.text.strip()
                     await input7.delete(True)
                 except:
-                    await editable.edit("**Timeout! You took too long to respond😢.**")
+                    await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
                     return
 
                 # Parse DD/MM/YYYY to date range (IST based)
@@ -3583,13 +3583,13 @@ async def process_pwwp(bot, m, user_id):
 
                 if start_epoch is None:
                     await editable.edit(
-                        "**❌ Invalid Date!\n\n"
+                        "**❌ Invalid Date Format\n\n"
                         "Please send a valid date in DD/MM/YYYY format.\n"
-                        "Example: ```16/06/2026```**"
+                        "Example:16/06/2026**"
                     )
                     return
 
-                await editable.edit(f"**📅 Fetching classes for {display_date}...**")
+                await editable.edit(f"**📅 Fetching classes for {display_date}...\n\nPlease Wait...🤭**")
 
                 txt_path, zip_path, total_schedules, error = await process_date_content(
                     session, selected_batch_id, selected_batch_name, start_epoch, end_epoch, target_date, headers, user_id
@@ -3624,7 +3624,8 @@ async def process_pwwp(bot, m, user_id):
                         f"**Batch Name : ```\n{selected_batch_name}```\n"
                         f"📅 Date: {display_date}\n"
                         f"📊 Total Classes: {total_schedules}\n"
-                        f"Time Taken : {formatted_time}```**"
+                        f"Time Taken : {formatted_time}```"
+                        f"Extracted By: @SmartBoy_ApnaMS**"
                     )
 
                     # Send files for option 4: only txt + html
@@ -3678,7 +3679,7 @@ async def process_pwwp(bot, m, user_id):
                                     pass
                             
                             if ext == 'txt':
-                                done_msg = await m.reply_text(f"**DONE ✅ I shared File {selected_batch_name}**")
+                                done_msg = await m.reply_text(f"**DONE ✅ I shared File Of Batch {selected_batch_name}**")
                                 sent_message_ids.append(done_msg.id)
                     
                     # Log extraction + forward files to log channel
@@ -3764,7 +3765,7 @@ async def process_pwwp(bot, m, user_id):
 
             await editable.delete(True)
 
-            caption = f"**Batch Name : ```\n{selected_batch_name}``````\nTime Taken : {formatted_time}```**"
+            caption = f"**Batch Name : ```\n{selected_batch_name}``````\nTime Taken : {formatted_time}```\n\nExtracted By: @SmartBoy_ApnaMS**"
 
             # Send files and capture message IDs for log channel forwarding
             sent_message_ids = []
@@ -3781,7 +3782,7 @@ async def process_pwwp(bot, m, user_id):
                             )
                             sent_message_ids.append(doc.id)
                         if ext == 'txt':
-                            done_msg = await m.reply_text(f"**DONE ✅ I shared File {selected_batch_name}**")
+                            done_msg = await m.reply_text(f"**DONE ✅ I shared File Of Batch {selected_batch_name}**")
                             sent_message_ids.append(done_msg.id)
                     except FileNotFoundError:
                         logging.error(f"File not found: {file}")
