@@ -127,7 +127,7 @@ print(4321)
 # single transient failure on startup left THUMBNAIL_FILE = None forever.
 THUMB_URL = "https://graph.org/file/5e7dc66913185f41c81ce-78485dba7e5ae7fc8e.jpg"
 THUMB_PATH = "document_thumb.jpg"
-THUMB_MAX_SIDE = 320       # Telegram hard limit
+THUMB_MAX_SIDE = 420       # Telegram hard limit
 THUMB_MAX_BYTES = 200 * 1024  # Telegram hard limit (< 200KB)
 
 
