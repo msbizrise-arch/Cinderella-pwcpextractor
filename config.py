@@ -4,7 +4,7 @@ API_ID = int(os.environ.get("API_ID", "38498066"))
 API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-OWNER = int(os.environ.get("OWNER", "6660248311"))
+OWNER = int(os.environ.get("OWNER", "8446475678"))
 
 AUTH_USER = os.environ.get(
     "AUTH_USERS",
@@ -16,7 +16,7 @@ if OWNER not in AUTH_USERS:
 
 # ── Logging Channel ────────────────────────────────────────────────────────
 # Format: -100123456789 (negative group chat ID)
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1001234567890"))
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-1003597599758"))
 
 # ── Video Player Configuration ─────────────────────────────────────────────
 HEROKU_VIDEO_URL = os.environ.get(
