@@ -3,7 +3,7 @@ import os
 API_ID = int(os.environ.get("API_ID", "38498066"))
 API_HASH = os.environ.get("API_HASH", "c9696114751feacdeb1b4487f5839a1a")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-THUMB_URL = "https://graph.org/file/673f55a25e28da21ade36-cc0b5c430f9666323e.jpg"
+THUMB_URL = "https://ibb.co/tpTLJ5wv"
 THUMB_PATH = "document_thumb_v2.jpg"
 
 OWNER = int(os.environ.get("OWNER", "8909902924"))
