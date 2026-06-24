@@ -242,6 +242,48 @@ def get_thumbnail():
     if not THUMBNAIL_FILE or not os.path.exists(THUMBNAIL_FILE):
         THUMBNAIL_FILE = ensure_thumbnail_exists(force=True)
     return THUMBNAIL_FILE
+
+
+async def get_thumbnail_async() -> str:
+    """Async-safe thumbnail getter.
+    Downloads & processes the thumbnail via aiohttp if the cached file is
+    missing or invalid, so the async event loop is never blocked.
+    Returns a valid local file path string, or None if everything fails."""
+    global THUMBNAIL_FILE
+
+    # Fast path: cached file is already good
+    if THUMBNAIL_FILE and os.path.exists(THUMBNAIL_FILE):
+        try:
+            from PIL import Image
+            with Image.open(THUMBNAIL_FILE) as im:
+                w, h = im.size
+            if (os.path.getsize(THUMBNAIL_FILE) < THUMB_MAX_BYTES and
+                    w <= THUMB_MAX_SIDE and h <= THUMB_MAX_SIDE):
+                return THUMBNAIL_FILE
+        except Exception:
+            pass  # fall through to re-download
+
+    # Slow path: download via aiohttp (non-blocking)
+    for attempt in range(1, 5):
+        try:
+            async with aiohttp.ClientSession() as _tsess:
+                async with _tsess.get(THUMB_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status == 200:
+                        raw = await resp.read()
+                        if raw and _process_thumbnail_bytes(raw, THUMB_PATH):
+                            THUMBNAIL_FILE = THUMB_PATH
+                            logging.info(f"[thumb_async] Thumbnail ready (attempt {attempt})")
+                            return THUMBNAIL_FILE
+                        else:
+                            logging.warning(f"[thumb_async] Processing failed (attempt {attempt})")
+                    else:
+                        logging.warning(f"[thumb_async] HTTP {resp.status} (attempt {attempt})")
+        except Exception as te:
+            logging.warning(f"[thumb_async] Download error attempt {attempt}: {te}")
+        await asyncio.sleep(1.5)
+
+    logging.error("[thumb_async] All attempts failed, sending without thumbnail")
+    return None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -3690,9 +3732,7 @@ async def process_pwwp(bot, m, user_id):
 
                         # Send only txt file for multi-date mode (no html)
                         if os.path.exists(dst_txt):
-                            _thumb_multi = get_thumbnail()
-                            if not _thumb_multi or not os.path.exists(_thumb_multi):
-                                _thumb_multi = None
+                            _thumb_multi = await get_thumbnail_async()
                             try:
                                 with open(dst_txt, 'rb') as f:
                                     sent_msg = await m.reply_document(
@@ -3808,9 +3848,7 @@ async def process_pwwp(bot, m, user_id):
                         for ext in files_to_send:
                             fp = f"{clean_file_name}.{ext}"
                             if os.path.exists(fp):
-                                _thumb_single = get_thumbnail()
-                                if not _thumb_single or not os.path.exists(_thumb_single):
-                                    _thumb_single = None
+                                _thumb_single = await get_thumbnail_async()
                                 try:
                                     with open(fp, 'rb') as f:
                                         sent_msg = await m.reply_document(
@@ -3929,7 +3967,7 @@ async def process_pwwp(bot, m, user_id):
                                 document=f,
                                 caption=caption if ext == 'txt' else f"{selected_batch_name} - {ext.upper() if ext != 'html' else 'Study Page'}",
                                 file_name=f"{clean_batch_name}.{ext}",
-                                thumb=get_thumbnail()
+                                thumb=await get_thumbnail_async()
                             )
                             sent_message_ids.append(doc.id)
                         if ext == 'txt':
