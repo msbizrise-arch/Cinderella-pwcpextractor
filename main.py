@@ -129,6 +129,12 @@ print(4321)
 # lag raha"). It also only ran once at import time with no retry, so a
 # single transient failure on startup left THUMBNAIL_FILE = None forever.
 THUMB_URL = "https://ibb.co/tpTLJ5wv"
+# Fallback URLs if primary fails (all are direct graph.org JPEGs)
+THUMB_FALLBACK_URLS = [
+    "https://graph.org/file/28339f6c961ca96a84f47-1a070fdc1632724513.jpg",
+    "https://graph.org/file/9db3816e75336ecc45959-6d49ddd4d0e92f1aae.jpg",
+    "https://graph.org/file/1d1548631e6d1d3b3796e-b6647f0434c20f100a.jpg",
+]
 THUMB_PATH = "document_thumb_v2.jpg"
 THUMB_MAX_SIDE = 320       # Telegram hard limit (matches the doc note above)
 THUMB_MAX_BYTES = 200 * 1024  # Telegram hard limit (< 200KB)
@@ -244,10 +250,43 @@ def get_thumbnail():
     return THUMBNAIL_FILE
 
 
+async def _resolve_direct_image_url(session, url: str) -> str:
+    """Resolve ibb.co page URL to direct image URL."""
+    import re as _re
+    ibb_hosts = ("ibb.co", "imgbb.com", "www.ibb.co", "www.imgbb.com")
+    parsed_host = url.split("/")[2] if url.startswith("http") else ""
+    if parsed_host not in ibb_hosts:
+        return url
+    try:
+        ua = {"User-Agent": "Mozilla/5.0 AppleWebKit/537.36"}
+        async with session.get(url, headers=ua, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                logging.warning(f"[thumb] ibb page HTTP {resp.status}")
+                return url
+            html = await resp.text(errors="replace")
+        # og:image is most reliable
+        m1 = _re.search(r"""property=["']og:image["'][^>]+content=["']([^"']+)["']""", html)
+        if not m1:
+            m1 = _re.search(r"""content=["']([^"']+)["'][^>]+property=["']og:image["']""", html)
+        if m1:
+            logging.info(f"[thumb] ibb og:image -> {m1.group(1).strip()}")
+            return m1.group(1).strip()
+        # fallback: scan for i.ibb.co direct URLs
+        imgs = _re.findall("https://i[.]ibb[.]co/[^\\s\"'<>]+[.](?:jpg|jpeg|png|webp)", html)
+        if imgs:
+            logging.info(f"[thumb] ibb scan -> {imgs[0]}")
+            return imgs[0]
+    except Exception as e:
+        logging.warning(f"[thumb] ibb resolve error: {e}")
+    return url
+
+
+
 async def get_thumbnail_async() -> str:
     """Async-safe thumbnail getter.
     Downloads & processes the thumbnail via aiohttp if the cached file is
     missing or invalid, so the async event loop is never blocked.
+    Handles ibb.co/imgbb.com page URLs by extracting the direct image URL.
     Returns a valid local file path string, or None if everything fails."""
     global THUMBNAIL_FILE
 
@@ -267,7 +306,10 @@ async def get_thumbnail_async() -> str:
     for attempt in range(1, 5):
         try:
             async with aiohttp.ClientSession() as _tsess:
-                async with _tsess.get(THUMB_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                # Resolve ibb.co/imgbb page to actual direct image URL first
+                direct_url = await _resolve_direct_image_url(_tsess, THUMB_URL)
+                logging.info(f"[thumb_async] Downloading from {direct_url} (attempt {attempt})")
+                async with _tsess.get(direct_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                     if resp.status == 200:
                         raw = await resp.read()
                         if raw and _process_thumbnail_bytes(raw, THUMB_PATH):
