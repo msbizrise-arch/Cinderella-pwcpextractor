@@ -131,9 +131,9 @@ print(4321)
 THUMB_URL = "https://ibb.co/tpTLJ5wv"
 # Fallback URLs if primary fails (all are direct graph.org JPEGs)
 THUMB_FALLBACK_URLS = [
-    "https://graph.org/file/28339f6c961ca96a84f47-1a070fdc1632724513.jpg",
-    "https://graph.org/file/9db3816e75336ecc45959-6d49ddd4d0e92f1aae.jpg",
-    "https://graph.org/file/1d1548631e6d1d3b3796e-b6647f0434c20f100a.jpg",
+    "https://graph.org/file/e42ea3720ae5176247b23-5e9b3934dc4d01b9fb.jpg",
+    "https://graph.org/file/30d1cab9d385fe5d22c51-a48071f3c33ffa205e.jpg",
+    "https://graph.org/file/e42ea3720ae5176247b23-5e9b3934dc4d01b9fb.jpg",
 ]
 THUMB_PATH = "document_thumb_v2.jpg"
 THUMB_MAX_SIDE = 320       # Telegram hard limit (matches the doc note above)
