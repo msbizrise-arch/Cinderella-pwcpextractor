@@ -128,7 +128,7 @@ print(4321)
 # dropped the thumbnail (no crash, no error -> looked like "thumbnail nahi
 # lag raha"). It also only ran once at import time with no retry, so a
 # single transient failure on startup left THUMBNAIL_FILE = None forever.
-THUMB_URL = "https://graph.org/file/673f55a25e28da21ade36-cc0b5c430f9666323e.jpg"
+THUMB_URL = "https://ibb.co/tpTLJ5wv"
 THUMB_PATH = "document_thumb_v2.jpg"
 THUMB_MAX_SIDE = 320       # Telegram hard limit (matches the doc note above)
 THUMB_MAX_BYTES = 200 * 1024  # Telegram hard limit (< 200KB)
