@@ -3690,13 +3690,16 @@ async def process_pwwp(bot, m, user_id):
 
                         # Send only txt file for multi-date mode (no html)
                         if os.path.exists(dst_txt):
+                            _thumb_multi = get_thumbnail()
+                            if not _thumb_multi or not os.path.exists(_thumb_multi):
+                                _thumb_multi = None
                             try:
                                 with open(dst_txt, 'rb') as f:
                                     sent_msg = await m.reply_document(
                                         document=f,
                                         caption=caption_multi,
-                                        file_name=f"{clean_batch_name_multi}_{disp_date}.txt",
-                                        thumb=get_thumbnail()
+                                        file_name=f"{selected_batch_name.replace('/', '-').replace('|', '-').replace(':', '-')}.txt",
+                                        thumb=_thumb_multi
                                     )
                                     all_sent_message_ids.append(sent_msg.id)
                                 logging.info(f"[MultiDate] Sent txt for {disp_date} ({index_label})")
@@ -3805,13 +3808,16 @@ async def process_pwwp(bot, m, user_id):
                         for ext in files_to_send:
                             fp = f"{clean_file_name}.{ext}"
                             if os.path.exists(fp):
+                                _thumb_single = get_thumbnail()
+                                if not _thumb_single or not os.path.exists(_thumb_single):
+                                    _thumb_single = None
                                 try:
                                     with open(fp, 'rb') as f:
                                         sent_msg = await m.reply_document(
                                             document=f,
                                             caption=caption if ext == 'txt' else f"{selected_batch_name} - Study Page",
                                             file_name=f"{selected_batch_name.replace('/', '-').replace('|', '-')}.{ext}",
-                                            thumb=get_thumbnail()
+                                            thumb=_thumb_single
                                         )
                                         sent_message_ids.append(sent_msg.id)
                                     logging.info(f"Sent {ext} file to user")
