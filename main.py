@@ -2427,7 +2427,7 @@ async def process_pwwp_subject(session, subject, batch_id, batch_name, zipf, jso
 
 def find_pw_old_batch(batch_search):
     try:
-        response = requests.get(f"https://abhiguru143.github.io/AS-MULTIVERSE-PW/batch/batch.json")
+        response = requests.get(f"https://allenextractor.github.io/rarestudy/batches.json")
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
@@ -3188,7 +3188,7 @@ async def start(bot, message):
     _save_broadcast_users(broadcast_users)
     random_image_url = random.choice(image_list)
     keyboard = [
-        [InlineKeyboardButton("🕺PHYSICS WALLAH🕺", callback_data="pwwp")],
+        [InlineKeyboardButton("PHYSICS WALLAH", callback_data="pwwp")],
         [InlineKeyboardButton("😋Join Channel", url="https://t.me/teamcinderella")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3301,7 +3301,7 @@ async def pwwp_callback(bot, callback_query):
     await callback_query.answer()
 
     if user_id not in auth_users:
-        await bot.send_message(callback_query.message.chat.id, "**You Are Not Subscribed To This Bot\nSo DM me for access\nID: @JapaneseFury**")
+        await bot.send_message(callback_query.message.chat.id, "**You Are Not Subscribed To This Bot\nSo DM me for access\nID: @SmartBoy_ApnaMS**")
         return
 
     THREADPOOL.submit(_run_async_in_thread, process_pwwp(bot, callback_query.message, user_id))
@@ -3331,7 +3331,7 @@ async def batch_next_callback(bot, callback_query):
         _, text = get_batches_for_page(user_id, new_page)
         keyboard = build_batch_pagination_keyboard(user_id, new_page)
 
-        header = f"**Send index number of the course to download.\n\n{text}\n\nIf Your Batch Not Listed Above Enter contact: @JapaneseFury**"
+        header = f"**Send index number of the course to download.\n\n{text}\n\nIf Your Batch Not Listed Above Enter contact: @SmartBoy_ApnaMS**"
         try:
             await callback_query.message.edit_text(header, reply_markup=keyboard)
         except Exception as e:
@@ -3357,7 +3357,7 @@ async def batch_prev_callback(bot, callback_query):
         _, text = get_batches_for_page(user_id, new_page)
         keyboard = build_batch_pagination_keyboard(user_id, new_page)
 
-        header = f"**Send index number of the course to download.\n\n{text}\n\nIf Your Batch Not Listed Above Contact: @JapaneseFury**"
+        header = f"**Send index number of the course to download.\n\n{text}\n\nIf Your Batch Not Listed Above Contact: @SmartBoy_ApnaMS**"
         try:
             await callback_query.message.edit_text(header, reply_markup=keyboard)
         except Exception as e:
@@ -3381,11 +3381,11 @@ async def process_pwwp(bot, m, user_id):
     )
 
     try:
-        input1 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+        input1 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
         raw_text1 = input1.text
         await input1.delete(True)
     except:
-        await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
+        await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
         return
 
     headers = get_pw_mobile_headers("")
@@ -3413,11 +3413,11 @@ async def process_pwwp(bot, m, user_id):
 
                 editable = await editable.edit("**ENTER OTP YOU RECEIVED\n\nOnly Enter 6 digit OTP.**")
                 try:
-                    input2 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                    input2 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                     otp = input2.text
                     await input2.delete(True)
                 except:
-                    await editable.edit("**Timeout! You took too long to respond\n\nPlease response under 60 seconds🙂.**")
+                    await editable.edit("**Timeout! You took too long to respond\n\nPlease response under 5 Minutes🙂.**")
                     return
 
                 payload = {
@@ -3484,11 +3484,11 @@ async def process_pwwp(bot, m, user_id):
                 "REMEMBER Only Purchased Batch ke Videos hi aayenge Otherwise Sirf PDFs😐.**"
             )
             try:
-                input3 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                input3 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                 batch_search = input3.text
                 await input3.delete(True)
             except:
-                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂..**")
+                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
                 return
 
             # ==========================================================
@@ -3527,11 +3527,11 @@ async def process_pwwp(bot, m, user_id):
             await editable.edit(header, reply_markup=keyboard)
 
             try:
-                input4 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                input4 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                 raw_text4 = input4.text
                 await input4.delete(True)
             except:
-                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
+                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
                 # Clean up pagination state
                 user_batch_pages.pop(user_id, None)
                 return
@@ -3561,11 +3561,11 @@ async def process_pwwp(bot, m, user_id):
                     await editable.edit(f"**Send index number of the course to download.\n\n{text}**")
 
                     try:
-                        input5 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                        input5 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                         raw_text5 = input5.text
                         await input5.delete(True)
                     except:
-                        await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
+                        await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
                         return
 
                     if input5.text.isdigit() and 1 <= int(input5.text) <= len(courses):
@@ -3598,11 +3598,11 @@ async def process_pwwp(bot, m, user_id):
             )
 
             try:
-                input6 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                input6 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                 raw_text6 = input6.text
                 await input6.delete(True)
             except ListenerTimeout:
-                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
+                await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
                 return
             except Exception as e:
                 logging.exception("Error during option listening:")
@@ -3670,7 +3670,7 @@ async def process_pwwp(bot, m, user_id):
                     with open(f"{clean_file_name}.txt", "w", encoding="utf-8") as f:
                         f.writelines(today_schedule)
                 else:
-                    raise Exception("No classes found for today.\n\nSo Revise today and prepare for tomorrow😊.")
+                    raise Exception("**No classes found for today.\n\nSo Revise today and prepare for tomorrow☺.**")
 
             # ==========================================================
             # OPTION 4: SELECT DATE (DD/MM/YYYY INPUT)
@@ -3681,6 +3681,7 @@ async def process_pwwp(bot, m, user_id):
             # ==========================================================
             elif input6.text == '4':
                 await editable.edit(
+                   f"You Choosed Batch\n**{selected_batch_name}**\n\n"
                     "**📅 Select Date\n\n"
                     "Single Date Format:\n"
                     "`16/06/2026`\n\n"
@@ -3691,11 +3692,11 @@ async def process_pwwp(bot, m, user_id):
                 )
 
                 try:
-                    input7 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                    input7 = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=300)
                     date_input = input7.text.strip()
                     await input7.delete(True)
                 except:
-                    await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 60 seconds🙂.**")
+                    await editable.edit("**Timeout! You took too long to respond😢\n\nPlease response under 5 Minutes🙂.**")
                     return
 
                 # ── Split on '&' to detect single vs multiple dates ────────────
@@ -3755,7 +3756,7 @@ async def process_pwwp(bot, m, user_id):
                             logging.warning(f"[MultiDate] No content for {disp_date}: {error}")
                             # Inform user and continue to next date
                             err_msg = await m.reply_text(
-                                f"**⚠️ {index_label} | {disp_date} — No content found, skipping.**"
+                                f"**⚠️ {index_label} | {disp_date} — No Any content found,This Date So skipping.**"
                             )
                             all_sent_message_ids.append(err_msg.id)
                             # Clean up any partial files
@@ -3807,7 +3808,7 @@ async def process_pwwp(bot, m, user_id):
                             f"📅 Date: {disp_date}\n"
                             f"📊 Total Classes: {total_schedules}\n"
                             f"Time Taken : {fmt_time_multi}```"
-                            f"Extracted By: @JapaneseFury**"
+                            f"Extracted By: @SmartBoy_ApnaMS**"
                         )
 
                         # Send only txt file for multi-date mode (no html)
@@ -3893,7 +3894,7 @@ async def process_pwwp(bot, m, user_id):
                             f"📅 Date: {disp_date}\n"
                             f"📊 Total Classes: {total_schedules}\n"
                             f"Time Taken : {formatted_time}```"
-                            f"Extracted By: @JapaneseFury**"
+                            f"Extracted By: @SmartBoy_ApnaMS**"
                         )
 
                         # Send files for single date: txt + html (original behaviour)
@@ -4034,7 +4035,7 @@ async def process_pwwp(bot, m, user_id):
 
             await editable.delete(True)
 
-            caption = f"**Batch Name : ```\n{selected_batch_name}``````\nTime Taken : {formatted_time}```\n\nExtracted By: @JapaneseFury**"
+            caption = f"**Batch Name : ```\n{selected_batch_name}``````\nTime Taken : {formatted_time}```\n\nExtracted By: @SmartBoy_ApnaMS**"
 
             # Send files and capture message IDs for log channel forwarding
             sent_message_ids = []
