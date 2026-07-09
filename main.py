@@ -609,6 +609,37 @@ def append_video_params(video_url: str, parent_id: str = "", child_id: str = "",
 
 
 # ===============================================================
+# NEW FEATURE: Extract Thumbnail URL (image) for a video
+# Thumbnail lives at videoDetails.image (e.g. https://static.pw.live/.../ADMIN/xxx.png)
+# Used to append "||thumbnail_url" after the video URL in exported txt files.
+# Does NOT touch any existing video-url extraction logic.
+# ===============================================================
+def extract_thumbnail_url(video_details: dict) -> str:
+    """Extract the thumbnail (image) URL for a video from its videoDetails dict.
+    Returns '' if not found so callers can safely skip appending '||'."""
+    if not video_details or not isinstance(video_details, dict):
+        return ""
+
+    thumb = video_details.get("image", "") or video_details.get("thumbnail", "") or video_details.get("thumbnailUrl", "")
+
+    if thumb and isinstance(thumb, str) and thumb.startswith("http"):
+        lower = thumb.lower()
+        if ".png" in lower or ".jpg" in lower or ".jpeg" in lower or ".webp" in lower:
+            return thumb
+
+    return ""
+
+
+def with_thumbnail(video_url_line: str, thumb_url: str) -> str:
+    """Append '||thumbnail_url' to an already-built 'Title:VideoURL...' line,
+    without any spaces around '||'. If no thumbnail is available, returns the
+    line unchanged (old format preserved)."""
+    if thumb_url:
+        return f"{video_url_line}||{thumb_url}"
+    return video_url_line
+
+
+# ===============================================================
 # COMPREHENSIVE: Extract video URL from ALL PW API response formats
 # ===============================================================
 def extract_comprehensive_video_url(video_details: dict, parent_id: str = "", child_id: str = "", video_id: str = "") -> Tuple[str, str]:
@@ -2200,7 +2231,8 @@ async def fetch_content_via_schedule_details(
                         # Method 1: Comprehensive extractor (PRIMARY - always with IDs)
                         vurl, drm = extract_comprehensive_video_url(video_details, parent_id, child_id, vid)
                         if vurl:
-                            line = f"{topic}:{vurl}{drm}"
+                            thumb_url = extract_thumbnail_url(video_details)
+                            line = with_thumbnail(f"{topic}:{vurl}{drm}", thumb_url)
                             if dedup.add_and_check_unique(line):
                                 all_lines.append(line)
                                 got_content = True
@@ -2210,7 +2242,9 @@ async def fetch_content_via_schedule_details(
                             video_info = extract_video_data_from_schedule(detail_data)
                             # Pass IDs to format_video_line as well
                             video_lines = format_video_line(topic, video_info, parent_id, child_id, vid)
+                            thumb_url = extract_thumbnail_url(video_details)
                             for vline in video_lines:
+                                vline = with_thumbnail(vline, thumb_url)
                                 if dedup.add_and_check_unique(vline):
                                     all_lines.append(vline)
                                     got_content = True
@@ -2262,7 +2296,8 @@ async def fetch_content_via_schedule_details(
                             child_id_fb = schedule_id
                             vid_fb = item.get('videoId', '') or item.get('contentId', '')
                             vurl = append_video_params(vurl, parent_id_fb, child_id_fb, vid_fb)
-                            line = f"{topic}:{vurl}{drm}"
+                            thumb_url = extract_thumbnail_url(item.get('videoDetails', {}))
+                            line = with_thumbnail(f"{topic}:{vurl}{drm}", thumb_url)
                             if dedup.add_and_check_unique(line):
                                 all_lines.append(line)
                                 got_content = True
@@ -2275,7 +2310,8 @@ async def fetch_content_via_schedule_details(
                                 child_id_fb = schedule_id
                                 vid_fb = item.get('videoId', '') or item.get('contentId', '')
                                 final_url = append_video_params(basic_url, parent_id_fb, child_id_fb, vid_fb)
-                                line = f"{topic}:{final_url}"
+                                thumb_url = extract_thumbnail_url(item.get('videoDetails', {}))
+                                line = with_thumbnail(f"{topic}:{final_url}", thumb_url)
                                 if dedup.add_and_check_unique(line):
                                     all_lines.append(line)
                                     got_content = True
@@ -2744,7 +2780,8 @@ async def fetch_date_schedule_details(session, batch_id, subject_id, schedule_id
         )
         vurl, drm = extract_comprehensive_video_url(video_details, parent_id, child_id, vid)
         if vurl:
-            line = f"{topic}:{vurl}{drm}"
+            thumb_url = extract_thumbnail_url(video_details)
+            line = with_thumbnail(f"{topic}:{vurl}{drm}", thumb_url)
             if dedup.add_and_check_unique(line):
                 video_lines.append(line)
 
@@ -3064,7 +3101,8 @@ async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSessio
             video_url, drm_info = extract_comprehensive_video_url(video_details, parent_id, child_id, video_id)
 
             if video_url:
-                line = f"{name}:{video_url}{drm_info}\n"
+                thumb_url = extract_thumbnail_url(video_details)
+                line = with_thumbnail(f"{name}:{video_url}{drm_info}", thumb_url) + "\n"
                 content.append(line)
 
         # --- HOMEWORK / NOTES (PDFs) ---
